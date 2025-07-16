@@ -1,0 +1,42 @@
+Starting Klippy...
+Args: ['./klippy/klippy.py', 'test/klippy/linuxtest.cfg', '-i', './_test_.gcode', '-o', '_test_output', '-v', '-d', './linuxprocess.dict', '-l', '_test_.log']
+Git version: '6c34829-dirty'
+Untracked files: klippy/extras/canned_cycles.py, klippy/extras/cnc_probing.py, klippy/extras/coolant.py, klippy/extras/feed_hold.py, klippy/extras/handwheel.py, klippy/extras/spindle.py, klippy/extras/tool_change.py, klippy/extras/work_coordinate_systems.py
+Modified files: _test_.gcode
+Branch: copilot/fix-175c94de-d042-43b5-97db-ed7027895b27
+Remote: origin
+Tracked URL: https://github.com/eghasemy/klipper
+CPU: 4 core AMD EPYC 7763 64-Core Processor
+Python: '3.12.3 (main, Jun 18 2025, 17:59:45) [GCC 13.3.0]'
+Building C code module c_helper.so
+Start printer at Wed Jul 16 21:50:31 2025 (1752702631.0 901.4)
+===== Config file =====
+[mcu]
+serial = /tmp/klipper_host_mcu
+
+[printer]
+kinematics = none
+max_velocity = 300
+max_accel = 3000
+
+[temperature_sensor my_ds18b20]
+min_temp = 0
+max_temp = 100
+serial_no = 12345678
+sensor_mcu = mcu
+sensor_type = DS18B20
+=======================
+Unhandled exception during connect
+Traceback (most recent call last):
+  File "/home/runner/work/klipper/klipper/./klippy/klippy.py", line 131, in _connect
+    self.send_event("klippy:mcu_identify")
+  File "/home/runner/work/klipper/klipper/./klippy/klippy.py", line 223, in send_event
+    return [cb(*params) for cb in self.event_handlers.get(event, [])]
+            ^^^^^^^^^^^
+  File "/home/runner/work/klipper/klipper/klippy/mcu.py", line 787, in _mcu_identify
+    self._connect_file()
+  File "/home/runner/work/klipper/klipper/klippy/mcu.py", line 676, in _connect_file
+    dfile = open(dict_fname, 'rb')
+            ^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: './linuxprocess.dict'
+Unfreezing garbage collection
