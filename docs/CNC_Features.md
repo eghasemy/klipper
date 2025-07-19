@@ -22,7 +22,11 @@ All CNC features coexist with existing 3D printer functionality, allowing dual-p
 
 ### Spindle Control
 
-The `[spindle]` section configures spindle control:
+Klipper supports multiple spindle control methods:
+
+#### GPIO/PWM Spindle Control
+
+The `[spindle]` section configures basic GPIO/PWM spindle control:
 
 ```ini
 [spindle]
@@ -36,11 +40,111 @@ min_power: 0.1             # Minimum PWM duty cycle
 max_power: 1.0             # Maximum PWM duty cycle
 ```
 
+#### Modbus VFD Spindle Control
+
+For VFDs that support Modbus RTU communication, use the `[modbus_spindle]` section:
+
+```ini
+[modbus]
+device: /dev/ttyUSB0        # USB to RS485 adapter device
+baudrate: 9600              # Communication speed
+slave_id: 1                 # VFD Modbus slave ID
+timeout: 1.0                # Communication timeout
+retries: 3                  # Number of retries on failure
+
+[modbus_spindle]
+protocol: generic           # VFD protocol (generic, huanyang, h100)
+min_rpm: 0                  # Minimum spindle speed
+max_rpm: 24000              # Maximum spindle speed
+speed_register: 0x2000      # Modbus register for speed setting
+control_register: 0x2001    # Modbus register for control (start/stop)
+status_register: 0x3000     # Modbus register for status reading
+frequency_register: 0x3001  # Modbus register for frequency reading
+status_interval: 1.0        # Status polling interval (seconds)
+```
+
+#### Huanyang VFD Specific Configuration
+
+For Huanyang VFDs, use the specialized `[huanyang_spindle]` section:
+
+```ini
+[modbus]
+device: /dev/ttyUSB0
+baudrate: 9600
+slave_id: 1
+
+[huanyang_spindle]
+min_rpm: 0
+max_rpm: 24000
+rated_frequency: 50.0       # Motor rated frequency (Hz)
+max_frequency: 100.0        # Maximum VFD frequency (Hz)
+speed_register: 0x1000      # Huanyang speed register
+control_register: 0x1001    # Huanyang control register
+status_register: 0x2000     # Huanyang status register
+frequency_register: 0x2001  # Huanyang frequency register
+```
+
 #### Commands
 
 - `M3 S[rpm]` - Start spindle clockwise at specified RPM
 - `M4 S[rpm]` - Start spindle counter-clockwise at specified RPM
 - `M5` - Stop spindle
+
+#### Hardware Requirements for Modbus
+
+- USB to RS485 adapter (e.g., FTDI-based converters)
+- Proper RS485 wiring (A+, B-, GND)
+- VFD configured for Modbus RTU communication
+- Correct baud rate and slave ID settings on VFD
+
+#### Troubleshooting Modbus Communication
+
+Common issues and solutions:
+
+1. **No Communication**
+   - Check USB to RS485 adapter device path (`/dev/ttyUSB0`)
+   - Verify baud rate matches VFD setting (usually 9600)
+   - Check slave ID matches VFD configuration
+   - Ensure RS485 wiring is correct (A+ to A+, B- to B-)
+
+2. **Communication Errors**
+   - Check for proper grounding between controller and VFD
+   - Verify termination resistors on RS485 bus (120Ω at each end)
+   - Reduce baud rate if experiencing frequent timeouts
+   - Check for electrical interference from motor cables
+
+3. **Speed Control Issues**
+   - Verify VFD register addresses match manufacturer specification
+   - Check frequency/RPM scaling settings in VFD
+   - Ensure VFD is configured for remote control mode
+   - Verify motor parameters are correctly set in VFD
+
+#### Supported VFD Models
+
+- **Huanyang Series**: GT/GD/GK series VFDs with Modbus support
+- **Generic Modbus**: Any VFD supporting Modbus RTU with holding registers
+- **Future Support**: Additional protocols can be added as needed
+
+#### VFD Configuration Requirements
+
+Most VFDs require these parameters to be set:
+
+1. **Communication Settings**
+   - Baud rate: 9600 (recommended)
+   - Data bits: 8
+   - Parity: None
+   - Stop bits: 1
+   - Slave ID: 1 (or as configured)
+
+2. **Control Mode**
+   - Set VFD to "Terminal Control" or "Remote Control"
+   - Enable Modbus communication
+   - Disable local panel control during operation
+
+3. **Motor Parameters**
+   - Set motor rated voltage, current, frequency
+   - Configure acceleration/deceleration times
+   - Set minimum and maximum frequencies
 
 ### Coolant Control
 
