@@ -73,6 +73,36 @@ class ModbusSpindle:
             self.run_ccw = 0x0002
             self.stop = 0x0000
             self.speed_multiplier = 1
+        elif self.protocol == 'h2a':
+            # H2A series VFD values
+            self.run_cw = 0x0001
+            self.run_ccw = 0x0002
+            self.stop = 0x0006
+            self.speed_multiplier = 1
+        elif self.protocol == 'danfoss_vlt2800':
+            # Danfoss VLT2800 VFD uses complex control word
+            self.run_cw = 0x0C7F
+            self.run_ccw = 0x047F
+            self.stop = 0x0C7E
+            self.speed_multiplier = 1
+        elif self.protocol == 'siemens_v20':
+            # Siemens V20 VFD values
+            self.run_cw = 0x0C7F   # Forward - ON
+            self.run_ccw = 0x047F  # Reverse - ON
+            self.stop = 0x0C7E     # Forward - OFF
+            self.speed_multiplier = 1
+        elif self.protocol == 'yl620':
+            # YL620 VFD values
+            self.run_cw = 0x12     # Start in forward direction
+            self.run_ccw = 0x22    # Start in reverse direction
+            self.stop = 0x01       # Disable spindle
+            self.speed_multiplier = 1
+        elif self.protocol == 'nowforever':
+            # NowForever VFD values
+            self.run_cw = 0x01     # Run CW
+            self.run_ccw = 0x03    # Run CCW
+            self.stop = 0x00       # Stop
+            self.speed_multiplier = 100
         else:
             # Generic Modbus VFD values
             self.run_cw = 0x0001
