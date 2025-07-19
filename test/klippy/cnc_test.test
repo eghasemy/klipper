@@ -1,0 +1,50 @@
+# Test case for CNC machine functionality
+CONFIG cnc_test.cfg
+
+# Initialize CNC machine
+CNC_START
+
+# Test spindle control
+M3 S12000          # Start spindle clockwise at 12000 RPM
+M5                 # Stop spindle
+M4 S8000           # Start spindle counter-clockwise at 8000 RPM
+M5                 # Stop spindle
+
+# Test coolant control
+M7                 # Mist coolant on
+M8                 # Flood coolant on
+M9                 # All coolant off
+
+# Test work coordinate systems
+G54                # Select coordinate system 1
+G92 X0 Y0 Z0       # Set current position as origin
+G55                # Select coordinate system 2
+G10 L2 P2 X10 Y10 Z5  # Set G55 offsets
+G0 X0 Y0           # Move to origin in G55 (should be 10,10 in machine coords)
+G54                # Back to G54
+
+# Test tool change
+T1                 # Select tool 1
+T0                 # Back to tool 0
+
+# Test probing (simulate)
+G38.2 Z-10 F100    # Probe down until contact
+G0 Z5              # Retract
+
+# Test feed hold
+M0 P2              # Pause for 2 seconds
+
+# Test drilling cycles
+G98                # Return to initial Z level
+G81 X50 Y50 Z-5 R2 F200  # Simple drilling cycle
+G82 X60 Y50 Z-5 R2 F200 P1  # Drilling with dwell
+G80                # Cancel canned cycle
+
+# Test handwheel functionality
+HANDWHEEL_ENABLE
+HANDWHEEL_SET_AXIS AXIS=X
+HANDWHEEL_JOG AXIS=X DISTANCE=1.0
+HANDWHEEL_DISABLE
+
+# Complete CNC operation
+CNC_END
