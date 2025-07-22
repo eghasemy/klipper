@@ -1,0 +1,54 @@
+# Comprehensive variable pressure advance tests
+DICTIONARY out/klipper.dict
+CONFIG variable_pressure_advance.cfg
+
+# Test 1: Basic variable pressure advance setup
+SET_VARIABLE_PRESSURE_ADVANCE EXTRUDER=extruder RATE_MIN=1.0 RATE_MAX=8.0 PA_MIN=0.02 PA_MAX=0.15 POWER=1.0
+
+# Home and initial moves
+G28
+G1 X20 Y20 Z1 F6000
+
+# Test 2: Slow extrusion (should use PA_MIN = 0.02)
+G1 E5 F60   # 1.0 mm/s extrusion rate
+G1 X25 Y25 E5.5 F60
+
+# Test 3: Medium extrusion (should interpolate)
+G1 E6 F300  # 5.0 mm/s extrusion rate  
+G1 X30 Y30 E6.5 F300
+
+# Test 4: Fast extrusion (should use PA_MAX = 0.15)
+G1 E7 F480  # 8.0 mm/s extrusion rate
+G1 X35 Y35 E7.5 F480
+
+# Test 5: Non-linear power factor
+SET_VARIABLE_PRESSURE_ADVANCE EXTRUDER=extruder RATE_MIN=1.0 RATE_MAX=8.0 PA_MIN=0.02 PA_MAX=0.15 POWER=2.0
+G1 X40 Y40 E8.0 F300
+
+# Test 6: Reverse non-linear (conservative at high speeds)
+SET_VARIABLE_PRESSURE_ADVANCE EXTRUDER=extruder RATE_MIN=1.0 RATE_MAX=8.0 PA_MIN=0.08 PA_MAX=0.12 POWER=0.5
+G1 X45 Y45 E8.5 F480
+
+# Test 7: With smoothing time
+SET_VARIABLE_PRESSURE_ADVANCE EXTRUDER=extruder RATE_MIN=2.0 RATE_MAX=10.0 PA_MIN=0.03 PA_MAX=0.18 POWER=1.5 SMOOTH_TIME=0.02
+G1 X50 Y50 E9.0 F600
+
+# Test 8: Calibration routine with small test
+CALIBRATE_PRESSURE_ADVANCE EXTRUDER=extruder START_RATE=1.5 END_RATE=6.0 STEPS=3 START_PA=0.01 END_PA=0.08 DISTANCE=15
+
+# Test 9: Test with extra stepper
+SET_VARIABLE_PRESSURE_ADVANCE EXTRUDER=my_extra_stepper RATE_MIN=0.8 RATE_MAX=12.0 PA_MIN=0.01 PA_MAX=0.25 POWER=1.8
+G1 X55 Y55 E9.5 F300
+
+# Test 10: Edge case - very low rate (should clamp to PA_MIN)
+SET_VARIABLE_PRESSURE_ADVANCE EXTRUDER=extruder RATE_MIN=5.0 RATE_MAX=15.0 PA_MIN=0.05 PA_MAX=0.20 POWER=1.0
+G1 E10 F30  # 0.5 mm/s, below RATE_MIN
+G1 X60 Y60 E10.5 F30
+
+# Test 11: Edge case - very high rate (should clamp to PA_MAX)
+G1 E11 F1200 # 20 mm/s, above RATE_MAX
+G1 X65 Y65 E11.5 F1200
+
+# Test 12: Return to traditional PA (disable variable)
+SET_PRESSURE_ADVANCE EXTRUDER=extruder ADVANCE=0.06
+G1 X70 Y70 E12.0 F300

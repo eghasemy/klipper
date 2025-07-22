@@ -105,7 +105,9 @@ pa_move_integrate(struct move *m, struct list_head *pa_list
             pa = list_prev_entry(pa, node);
         }
         // Calculate extrusion rate for variable pressure advance
-        double extrude_rate = m->axes_r.x; // X axis is extruder position in extruder moves
+        // For extruder moves, calculate the average velocity during the move
+        double move_distance = fabs(m->start_v * m->move_t + 0.5 * 2.0 * m->half_accel * m->move_t * m->move_t);
+        double extrude_rate = move_distance > 0 ? move_distance / m->move_t : fabs(m->start_v);
         pressure_advance = pa_calc_variable(pa, extrude_rate);
     }
     // Calculate base position and velocity with pressure advance
