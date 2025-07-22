@@ -7,6 +7,7 @@
 #include <stddef.h> // offsetof
 #include <stdlib.h> // malloc
 #include <string.h> // memset
+#include <math.h> // pow
 #include "compiler.h" // __visible
 #include "itersolve.h" // struct stepper_kinematics
 #include "list.h" // list_node
@@ -15,6 +16,11 @@
 
 struct pa_params {
     double pressure_advance, active_print_time;
+    // Variable pressure advance based on extrusion rate
+    int is_variable;
+    double pa_rate_min, pa_rate_max;        // Min/max extrusion rates for variable PA
+    double pa_value_min, pa_value_max;      // Corresponding PA values
+    double pa_rate_power;                   // Power factor for non-linear interpolation
     struct list_node node;
 };
 
@@ -56,6 +62,30 @@ extruder_integrate_time(double base, double start_v, double half_accel
     return ei - si;
 }
 
+// Calculate variable pressure advance based on extrusion rate
+static double
+pa_calc_variable(struct pa_params *pa, double extrude_rate)
+{
+    if (!pa->is_variable)
+        return pa->pressure_advance;
+    
+    // Clamp rate to defined range
+    if (extrude_rate <= pa->pa_rate_min)
+        return pa->pa_value_min;
+    if (extrude_rate >= pa->pa_rate_max)
+        return pa->pa_value_max;
+    
+    // Calculate interpolation factor
+    double rate_factor = (extrude_rate - pa->pa_rate_min) / (pa->pa_rate_max - pa->pa_rate_min);
+    
+    // Apply power factor for non-linear interpolation
+    if (pa->pa_rate_power != 1.0)
+        rate_factor = pow(rate_factor, pa->pa_rate_power);
+    
+    // Linear interpolation between min and max PA values
+    return pa->pa_value_min + rate_factor * (pa->pa_value_max - pa->pa_value_min);
+}
+
 // Calculate the definitive integral of extruder for a given move
 static double
 pa_move_integrate(struct move *m, struct list_head *pa_list
@@ -74,7 +104,9 @@ pa_move_integrate(struct move *m, struct list_head *pa_list
                 !list_is_first(&pa->node, pa_list)) {
             pa = list_prev_entry(pa, node);
         }
-        pressure_advance = pa->pressure_advance;
+        // Calculate extrusion rate for variable pressure advance
+        double extrude_rate = m->axes_r.x; // X axis is extruder position in extruder moves
+        pressure_advance = pa_calc_variable(pa, extrude_rate);
     }
     // Calculate base position and velocity with pressure advance
     base += pressure_advance * m->start_v;
@@ -160,8 +192,8 @@ extruder_set_pressure_advance(struct stepper_kinematics *sk, double print_time
     es->inv_half_smooth_time2 = 1. / (hst * hst);
 
     if (list_last_entry(&es->pa_list, struct pa_params, node)->pressure_advance
-            == pressure_advance) {
-        // Retain old pa_params
+            == pressure_advance && !list_last_entry(&es->pa_list, struct pa_params, node)->is_variable) {
+        // Retain old pa_params for simple pressure advance
         return;
     }
     // Add new pressure advance parameters
@@ -169,6 +201,28 @@ extruder_set_pressure_advance(struct stepper_kinematics *sk, double print_time
     memset(pa, 0, sizeof(*pa));
     pa->pressure_advance = pressure_advance;
     pa->active_print_time = print_time;
+    pa->is_variable = 0; // Simple pressure advance by default
+    list_add_tail(&pa->node, &es->pa_list);
+}
+
+void __visible
+extruder_set_variable_pressure_advance(struct stepper_kinematics *sk, double print_time
+                                       , double rate_min, double rate_max
+                                       , double pa_min, double pa_max, double power)
+{
+    struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
+    
+    // Add new variable pressure advance parameters
+    struct pa_params *pa = malloc(sizeof(*pa));
+    memset(pa, 0, sizeof(*pa));
+    pa->pressure_advance = pa_min; // Default value for backward compatibility
+    pa->active_print_time = print_time;
+    pa->is_variable = 1;
+    pa->pa_rate_min = rate_min;
+    pa->pa_rate_max = rate_max;
+    pa->pa_value_min = pa_min;
+    pa->pa_value_max = pa_max;
+    pa->pa_rate_power = power;
     list_add_tail(&pa->node, &es->pa_list);
 }
 
@@ -182,6 +236,7 @@ extruder_stepper_alloc(void)
     list_init(&es->pa_list);
     struct pa_params *pa = malloc(sizeof(*pa));
     memset(pa, 0, sizeof(*pa));
+    pa->is_variable = 0; // Initialize as simple pressure advance
     list_add_tail(&pa->node, &es->pa_list);
     return &es->sk;
 }

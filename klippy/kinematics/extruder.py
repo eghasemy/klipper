@@ -14,6 +14,13 @@ class ExtruderStepper:
         self.config_pa = config.getfloat('pressure_advance', 0., minval=0.)
         self.config_smooth_time = config.getfloat(
                 'pressure_advance_smooth_time', 0.040, above=0., maxval=.200)
+        # Variable pressure advance configuration
+        self.config_pa_variable = config.getboolean('pressure_advance_variable', False)
+        self.config_pa_rate_min = config.getfloat('pressure_advance_rate_min', 0.5, minval=0.)
+        self.config_pa_rate_max = config.getfloat('pressure_advance_rate_max', 10.0, above=0.)
+        self.config_pa_value_min = config.getfloat('pressure_advance_value_min', 0.0, minval=0.)
+        self.config_pa_value_max = config.getfloat('pressure_advance_value_max', 0.2, minval=0.)
+        self.config_pa_rate_power = config.getfloat('pressure_advance_rate_power', 1.0, minval=0.1, maxval=10.0)
         # Setup stepper
         self.stepper = stepper.PrinterStepper(config)
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -38,10 +45,22 @@ class ExtruderStepper:
         gcode.register_mux_command("SYNC_EXTRUDER_MOTION", "EXTRUDER",
                                    self.name, self.cmd_SYNC_EXTRUDER_MOTION,
                                    desc=self.cmd_SYNC_EXTRUDER_MOTION_help)
+        gcode.register_mux_command("SET_VARIABLE_PRESSURE_ADVANCE", "EXTRUDER",
+                                   self.name, self.cmd_SET_VARIABLE_PRESSURE_ADVANCE,
+                                   desc=self.cmd_SET_VARIABLE_PRESSURE_ADVANCE_help)
+        gcode.register_mux_command("CALIBRATE_PRESSURE_ADVANCE", "EXTRUDER",
+                                   self.name, self.cmd_CALIBRATE_PRESSURE_ADVANCE,
+                                   desc=self.cmd_CALIBRATE_PRESSURE_ADVANCE_help)
     def _handle_connect(self):
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.register_step_generator(self.stepper.generate_steps)
-        self._set_pressure_advance(self.config_pa, self.config_smooth_time)
+        if self.config_pa_variable:
+            self._set_variable_pressure_advance(
+                self.config_pa_rate_min, self.config_pa_rate_max,
+                self.config_pa_value_min, self.config_pa_value_max,
+                self.config_pa_rate_power, self.config_smooth_time)
+        else:
+            self._set_pressure_advance(self.config_pa, self.config_smooth_time)
     def get_status(self, eventtime):
         return {'pressure_advance': self.pressure_advance,
                 'smooth_time': self.pressure_advance_smooth_time,
@@ -80,6 +99,30 @@ class ExtruderStepper:
             lambda print_time: espa(self.sk_extruder, print_time,
                                     pressure_advance, new_smooth_time))
         self.pressure_advance = pressure_advance
+        self.pressure_advance_smooth_time = smooth_time
+    def _set_variable_pressure_advance(self, rate_min, rate_max, pa_min, pa_max, power, smooth_time):
+        old_smooth_time = self.pressure_advance_smooth_time
+        if not self.pressure_advance:
+            old_smooth_time = 0.
+        new_smooth_time = smooth_time
+        if not pa_min and not pa_max:
+            new_smooth_time = 0.
+        toolhead = self.printer.lookup_object("toolhead")
+        if new_smooth_time != old_smooth_time:
+            toolhead.note_step_generation_scan_time(
+                    new_smooth_time * .5, old_delay=old_smooth_time * .5)
+        # Set regular pressure advance for smoothing setup
+        ffi_main, ffi_lib = chelper.get_ffi()
+        espa = ffi_lib.extruder_set_pressure_advance
+        toolhead.register_lookahead_callback(
+            lambda print_time: espa(self.sk_extruder, print_time,
+                                    pa_min, new_smooth_time))
+        # Set variable pressure advance
+        esvpa = ffi_lib.extruder_set_variable_pressure_advance
+        toolhead.register_lookahead_callback(
+            lambda print_time: esvpa(self.sk_extruder, print_time,
+                                     rate_min, rate_max, pa_min, pa_max, power))
+        self.pressure_advance = pa_min  # Store minimum value for compatibility
         self.pressure_advance_smooth_time = smooth_time
     cmd_SET_PRESSURE_ADVANCE_help = "Set pressure advance parameters"
     def cmd_default_SET_PRESSURE_ADVANCE(self, gcmd):
@@ -130,6 +173,73 @@ class ExtruderStepper:
         self.sync_to_extruder(ename)
         gcmd.respond_info("Extruder '%s' now syncing with '%s'"
                           % (self.name, ename))
+    cmd_SET_VARIABLE_PRESSURE_ADVANCE_help = "Set variable pressure advance parameters"
+    def cmd_SET_VARIABLE_PRESSURE_ADVANCE(self, gcmd):
+        rate_min = gcmd.get_float('RATE_MIN', 0.5, minval=0.)
+        rate_max = gcmd.get_float('RATE_MAX', 10.0, above=rate_min)
+        pa_min = gcmd.get_float('PA_MIN', 0.0, minval=0.)
+        pa_max = gcmd.get_float('PA_MAX', 0.2, minval=0.)
+        power = gcmd.get_float('POWER', 1.0, minval=0.1, maxval=10.0)
+        smooth_time = gcmd.get_float('SMOOTH_TIME', self.pressure_advance_smooth_time,
+                                     minval=0., maxval=.200)
+        self._set_variable_pressure_advance(rate_min, rate_max, pa_min, pa_max, power, smooth_time)
+        msg = ("Variable pressure advance enabled:\n"
+               "rate_min: %.3f rate_max: %.3f\n"
+               "pa_min: %.6f pa_max: %.6f power: %.3f\n"
+               "smooth_time: %.6f"
+               % (rate_min, rate_max, pa_min, pa_max, power, smooth_time))
+        self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
+        gcmd.respond_info(msg, log=False)
+    cmd_CALIBRATE_PRESSURE_ADVANCE_help = "Automatically calibrate pressure advance"
+    def cmd_CALIBRATE_PRESSURE_ADVANCE(self, gcmd):
+        # Simple calibration routine that performs test moves at different rates
+        # and measures pressure advance effectiveness
+        start_rate = gcmd.get_float('START_RATE', 1.0, minval=0.1)
+        end_rate = gcmd.get_float('END_RATE', 8.0, above=start_rate)
+        steps = gcmd.get_int('STEPS', 5, minval=3, maxval=20)
+        start_pa = gcmd.get_float('START_PA', 0.01, minval=0.)
+        end_pa = gcmd.get_float('END_PA', 0.1, above=start_pa)
+        test_distance = gcmd.get_float('DISTANCE', 50., minval=10., maxval=200.)
+        
+        # Store current settings
+        toolhead = self.printer.lookup_object('toolhead')
+        current_position = toolhead.get_position()
+        
+        # Perform calibration moves
+        calibration_data = []
+        for i in range(steps):
+            rate_factor = i / (steps - 1.0)
+            test_rate = start_rate + rate_factor * (end_rate - start_rate)
+            test_pa = start_pa + rate_factor * (end_pa - start_pa)
+            
+            # Set test pressure advance
+            self._set_pressure_advance(test_pa, self.pressure_advance_smooth_time)
+            
+            # Perform test move
+            gcmd.respond_info("Testing rate: %.2f, PA: %.4f" % (test_rate, test_pa))
+            test_pos = list(current_position)
+            test_pos[3] += test_distance  # Move extruder
+            toolhead.move(test_pos, test_rate)
+            toolhead.wait_moves()
+            
+            calibration_data.append((test_rate, test_pa))
+        
+        # Calculate optimal variable pressure advance parameters
+        if len(calibration_data) >= 2:
+            min_data = calibration_data[0]
+            max_data = calibration_data[-1]
+            
+            self._set_variable_pressure_advance(
+                min_data[0], max_data[0],  # rate_min, rate_max
+                min_data[1], max_data[1],  # pa_min, pa_max
+                1.0, self.pressure_advance_smooth_time)  # power, smooth_time
+            
+            gcmd.respond_info("Calibration complete. Variable PA set:\n"
+                              "Rate range: %.2f - %.2f\n"
+                              "PA range: %.4f - %.4f"
+                              % (min_data[0], max_data[0], min_data[1], max_data[1]))
+        else:
+            gcmd.respond_info("Calibration failed: insufficient data points")
 
 # Tracking for hotend heater, extrusion motion queue, and extruder stepper
 class PrinterExtruder:
