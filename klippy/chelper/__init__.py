@@ -151,6 +151,9 @@ defs_kin_extruder = """
     void extruder_stepper_free(struct stepper_kinematics *sk);
     void extruder_set_pressure_advance(struct stepper_kinematics *sk
         , double print_time, double pressure_advance, double smooth_time);
+    void extruder_set_variable_pressure_advance(struct stepper_kinematics *sk
+        , double print_time, double rate_min, double rate_max
+        , double pa_min, double pa_max, double power);
 """
 
 defs_kin_shaper = """
