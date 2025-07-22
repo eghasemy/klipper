@@ -141,6 +141,11 @@ def get_adaptive_ei_shaper(shaper_freq, damping_ratio):
 
 def get_multi_freq_shaper(shaper_freq, damping_ratio):
     # Multi-frequency shaper for complex resonance patterns
+    # Add validation to prevent problematic configurations
+    if shaper_freq < 15.0:
+        # For very low frequencies, fall back to simpler shaper
+        return get_mzv_shaper(shaper_freq, damping_ratio)
+        
     # Primary frequency at shaper_freq, secondary at 1.5x frequency
     v_tol = 1. / SHAPER_VIBRATION_REDUCTION
     df = math.sqrt(1. - damping_ratio**2)
@@ -162,10 +167,23 @@ def get_multi_freq_shaper(shaper_freq, damping_ratio):
     total = a1 + a2 + a3 + a4
     A = [a1/total, a2/total, a3/total, a4/total]
     T = [0., .3*t_d1, .6*t_d2, t_d1]
+    
+    # Validation: ensure reasonable timing
+    if max(T) > 0.3:  # Limit maximum shaper duration
+        return get_ei_shaper(shaper_freq, damping_ratio)
+        
     return (A, T)
 
 def get_ultra_low_vibration_shaper(shaper_freq, damping_ratio):
     # Ultra low vibration shaper with very tight tolerance
+    # Add frequency validation to prevent unreasonable configurations
+    if shaper_freq < 25.0:
+        # For very low frequencies, reduce complexity to prevent instability
+        return get_3hump_ei_shaper(shaper_freq, damping_ratio)
+    if shaper_freq > 120.0:
+        # For very high frequencies, also reduce complexity
+        return get_ei_shaper(shaper_freq, damping_ratio)
+        
     v_tol = 1. / (SHAPER_VIBRATION_REDUCTION * 2.) # Even tighter tolerance
     df = math.sqrt(1. - damping_ratio**2)
     K = math.exp(-damping_ratio * math.pi / df)
@@ -187,6 +205,12 @@ def get_ultra_low_vibration_shaper(shaper_freq, damping_ratio):
     total = a1 + a2 + a3 + a4 + a5 + a6
     A = [a1/total, a2/total, a3/total, a4/total, a5/total, a6/total]
     T = [0., .3*t_d, .6*t_d, t_d, 1.3*t_d, 1.6*t_d]
+    
+    # Additional validation
+    if max(T) > 0.5:  # Limit maximum shaper duration
+        # Fall back to 3hump_ei for very long durations
+        return get_3hump_ei_shaper(shaper_freq, damping_ratio)
+        
     return (A, T)
 
 # min_freq for each shaper is chosen to have projected max_accel ~= 1500

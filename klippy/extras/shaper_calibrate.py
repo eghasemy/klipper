@@ -343,6 +343,7 @@ class ShaperCalibrate:
 
     def _get_shaper_smoothing(self, shaper, accel=5000, scv=5.):
         half_accel = accel * .5
+        scv = scv or 5.  # Default scv value if None
 
         A, T = shaper
         inv_D = 1. / sum(A)
@@ -611,10 +612,29 @@ class ShaperCalibrate:
             return
         gcode = self.printer.lookup_object("gcode")
         axis = axis.upper()
-        input_shaper.cmd_SET_INPUT_SHAPER(gcode.create_gcode_command(
-                "SET_INPUT_SHAPER", "SET_INPUT_SHAPER", {
-                    "SHAPER_TYPE_" + axis: shaper_name,
-                    "SHAPER_FREQ_" + axis: shaper_freq}))
+        
+        # Try to apply the requested shaper
+        try:
+            input_shaper.cmd_SET_INPUT_SHAPER(gcode.create_gcode_command(
+                    "SET_INPUT_SHAPER", "SET_INPUT_SHAPER", {
+                        "SHAPER_TYPE_" + axis: shaper_name,
+                        "SHAPER_FREQ_" + axis: shaper_freq}))
+        except Exception as e:
+            # If advanced shaper fails, try fallback
+            advanced_shapers = ['smooth', 'adaptive_ei', 'multi_freq', 'ulv']
+            if shaper_name in advanced_shapers:
+                gcode.respond_info("Advanced shaper '%s' failed, trying fallback to 'mzv'" % shaper_name)
+                try:
+                    input_shaper.cmd_SET_INPUT_SHAPER(gcode.create_gcode_command(
+                            "SET_INPUT_SHAPER", "SET_INPUT_SHAPER", {
+                                "SHAPER_TYPE_" + axis: "mzv",
+                                "SHAPER_FREQ_" + axis: shaper_freq}))
+                    gcode.respond_info("Successfully applied fallback 'mzv' shaper for %s axis" % axis.lower())
+                except Exception as e2:
+                    gcode.respond_error("Failed to apply both '%s' and fallback 'mzv' shapers: %s" % (shaper_name, str(e2)))
+                    raise e2
+            else:
+                raise e
 
     def save_calibration_data(self, output, calibration_data, shapers=None,
                               max_freq=None):
