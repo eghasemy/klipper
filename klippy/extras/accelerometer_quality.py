@@ -115,6 +115,7 @@ class AccelerometerQuality:
         
     def _monitor_loop(self):
         """Main monitoring loop that runs in background thread"""
+        sample_count = 0
         try:
             while True:
                 with self.lock:
@@ -125,6 +126,12 @@ class AccelerometerQuality:
                 try:
                     vibration_magnitude = self._measure_vibration()
                     self._adjust_speed_based_on_vibration(vibration_magnitude)
+                    
+                    # Periodically clean up old samples to prevent memory buildup
+                    sample_count += 1
+                    if sample_count % 30 == 0:  # Every 30 samples
+                        self._cleanup_old_samples()
+                        
                 except Exception as e:
                     logging.warning("AccelerometerQuality: Error in monitoring loop: %s", e)
                     
@@ -137,6 +144,23 @@ class AccelerometerQuality:
             with self.lock:
                 self.is_monitoring = False
                 
+    def _cleanup_old_samples(self):
+        """Clean up old accelerometer samples to prevent memory buildup"""
+        if self.accel_client is None:
+            return
+            
+        # Get current samples and clear old ones
+        # The AccelQueryHelper accumulates samples, so we need to limit this
+        try:
+            samples = self.accel_client.get_samples()
+            if len(samples) > 1000:  # Keep last 1000 samples max
+                # Create a new client to reset sample buffer
+                old_client = self.accel_client
+                self.accel_client = self.accel_chip.start_internal_client()
+                old_client.finish_measurements()
+        except Exception as e:
+            logging.warning("AccelerometerQuality: Error cleaning up samples: %s", e)
+                
     def _measure_vibration(self):
         """Measure current vibration magnitude from accelerometer"""
         if self.accel_client is None:
@@ -147,10 +171,9 @@ class AccelerometerQuality:
         if not samples:
             return 0.0
             
-        # Calculate RMS vibration magnitude from recent samples
-        # Use last N samples or samples from last sample_time period
-        recent_samples = []
+        # Filter samples to recent time window
         current_time = time.time()
+        recent_samples = []
         
         for sample in reversed(samples):
             sample_time, x, y, z = sample
@@ -158,18 +181,27 @@ class AccelerometerQuality:
                 break
             recent_samples.append((x, y, z))
             
-        if not recent_samples:
+        if len(recent_samples) < 3:  # Need minimum samples for meaningful analysis
             return 0.0
             
-        # Calculate RMS magnitude (remove gravity component roughly)
-        total_magnitude = 0.0
+        # Calculate mean acceleration to estimate static component (gravity)
+        mean_x = sum(x for x, y, z in recent_samples) / len(recent_samples)
+        mean_y = sum(y for x, y, z in recent_samples) / len(recent_samples)
+        mean_z = sum(z for x, y, z in recent_samples) / len(recent_samples)
+        
+        # Calculate RMS of acceleration variations (vibrations)
+        total_variance = 0.0
         for x, y, z in recent_samples:
-            # Calculate magnitude without gravity (rough approximation)
-            magnitude = math.sqrt(x*x + y*y + (z-9806.65)*(z-9806.65))  # z gravity ~9.8 m/s^2 in mm/s^2
-            total_magnitude += magnitude * magnitude
+            # Remove DC component (gravity/static acceleration)
+            dx = x - mean_x
+            dy = y - mean_y  
+            dz = z - mean_z
+            # Calculate magnitude of vibration vector
+            vibration_magnitude = math.sqrt(dx*dx + dy*dy + dz*dz)
+            total_variance += vibration_magnitude * vibration_magnitude
             
-        rms_magnitude = math.sqrt(total_magnitude / len(recent_samples))
-        return rms_magnitude
+        rms_vibration = math.sqrt(total_variance / len(recent_samples))
+        return rms_vibration
         
     def _adjust_speed_based_on_vibration(self, vibration_magnitude):
         """Adjust print speed based on measured vibration"""
