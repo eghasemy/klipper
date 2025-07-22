@@ -47,7 +47,10 @@ class AdaptiveCompensationModel:
         # Model data
         self.spatial_points = []
         self.compensation_model = {}
-        self.current_parameters = {'x': None, 'y': None}
+        
+        # Multi-axis support
+        self.supported_axes = ['x', 'y', 'z', 'a', 'b', 'c']
+        self.current_parameters = {axis: None for axis in self.supported_axes}
         self.last_position = None
         self.last_movement_params = None
         
@@ -163,23 +166,30 @@ class AdaptiveCompensationModel:
             
             # Test basic resonances at this point
             try:
-                # Test X axis
-                x_data = res_tester._test_axis(gcmd, 'x')
-                point.calibration_data['x'] = x_data
-                
-                # Test Y axis  
-                y_data = res_tester._test_axis(gcmd, 'y')
-                point.calibration_data['y'] = y_data
+                # Test all supported axes
+                for axis in self.supported_axes[:3]:  # Test X, Y, Z axes
+                    try:
+                        axis_data = res_tester._test_axis(gcmd, axis)
+                        point.calibration_data[axis] = axis_data
+                    except Exception as axis_error:
+                        gcmd.respond_info(f"Warning: Failed to test {axis}-axis at point {i}: {axis_error}")
+                        continue
                 
                 # Analyze resonance characteristics
                 self._analyze_point_resonances(point)
                 
                 calibration_results[f"point_{i}"] = {
                     'position': point.position,
-                    'x_peaks': point.calibration_data['x'].find_peak_frequencies().tolist(),
-                    'y_peaks': point.calibration_data['y'].find_peak_frequencies().tolist(),
                     'optimal_shapers': point.optimal_shapers
                 }
+                
+                # Add peak frequencies for each tested axis
+                for axis in point.calibration_data:
+                    try:
+                        peaks = point.calibration_data[axis].find_peak_frequencies().tolist()
+                        calibration_results[f"point_{i}"][f'{axis}_peaks'] = peaks
+                    except:
+                        calibration_results[f"point_{i}"][f'{axis}_peaks'] = []
                 
             except Exception as e:
                 gcmd.respond_info(f"Warning: Failed to calibrate point {i}: {e}")

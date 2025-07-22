@@ -6,9 +6,127 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-import logging, math, time, collections
+import logging, math, time, collections, re
 import numpy as np
 from . import shaper_defs
+
+######################################################################
+# G-code Feature Type Detection and Configuration
+######################################################################
+
+class FeatureTypeManager:
+    """Manages G-code feature type detection and specific compensation configurations"""
+    
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        
+        # Feature type detection
+        self.current_feature = None
+        self.feature_regex = re.compile(r';\s*TYPE:\s*([\w-]+)', re.IGNORECASE)
+        
+        # Feature-specific configurations
+        self.feature_configs = {}
+        self._load_feature_configs(config)
+        
+        # Quality presets for each feature type
+        self.quality_presets = {
+            'speed': {
+                'shaper_preference': ['smooth', 'zv', 'mzv'],
+                'freq_adjustment': 1.1,
+                'damping_adjustment': 0.9
+            },
+            'balance': {
+                'shaper_preference': ['ei', 'adaptive_ei', 'mzv'],
+                'freq_adjustment': 1.0,
+                'damping_adjustment': 1.0
+            },
+            'quality': {
+                'shaper_preference': ['ulv', 'multi_freq', 'ei'],
+                'freq_adjustment': 0.95,
+                'damping_adjustment': 1.2
+            }
+        }
+        
+        # Hook into G-code processing
+        gcode = self.printer.lookup_object('gcode')
+        self.original_process_commands = gcode._process_commands
+        gcode._process_commands = self._enhanced_process_commands
+    
+    def _load_feature_configs(self, config):
+        """Load feature-specific configuration from config file"""
+        
+        # Default feature types with their default preferences
+        default_features = {
+            'WALL-OUTER': 'quality',
+            'WALL-INNER': 'balance', 
+            'INFILL': 'speed',
+            'SUPPORT': 'speed',
+            'BRIDGE': 'quality',
+            'TOP-SURFACE': 'quality',
+            'BOTTOM-SURFACE': 'balance',
+            'PERIMETER': 'quality',
+            'SOLID-INFILL': 'balance',
+            'SPARSE-INFILL': 'speed',
+            'SKIRT': 'speed',
+            'BRIM': 'balance'
+        }
+        
+        # Load configurations from config file
+        for feature, default_pref in default_features.items():
+            pref = config.get(f'feature_{feature.lower().replace("-", "_")}_preference', default_pref)
+            if pref not in self.quality_presets:
+                logging.warning(f"Unknown preference '{pref}' for feature {feature}, using 'balance'")
+                pref = 'balance'
+            
+            self.feature_configs[feature] = {
+                'preference': pref,
+                'custom_shaper': config.get(f'feature_{feature.lower().replace("-", "_")}_shaper', None),
+                'custom_freq_x': config.getfloat(f'feature_{feature.lower().replace("-", "_")}_freq_x', None),
+                'custom_freq_y': config.getfloat(f'feature_{feature.lower().replace("-", "_")}_freq_y', None),
+                'custom_freq_z': config.getfloat(f'feature_{feature.lower().replace("-", "_")}_freq_z', None),
+            }
+    
+    def _enhanced_process_commands(self, commands, need_ack=True):
+        """Enhanced G-code command processor that detects feature types"""
+        for line in commands:
+            # Check for feature type comments before processing
+            comment_match = self.feature_regex.search(line)
+            if comment_match:
+                new_feature = comment_match.group(1).upper()
+                if new_feature != self.current_feature:
+                    self.current_feature = new_feature
+                    self._notify_feature_change(new_feature)
+        
+        # Process commands normally
+        return self.original_process_commands(commands, need_ack)
+    
+    def _notify_feature_change(self, feature_type):
+        """Notify dynamic input shaper of feature type change"""
+        try:
+            dynamic_shaper = self.printer.lookup_object('dynamic_input_shaper')
+            dynamic_shaper.set_current_feature(feature_type)
+        except:
+            pass  # Dynamic shaper may not be configured
+    
+    def get_feature_compensation_params(self, feature_type):
+        """Get compensation parameters for a specific feature type"""
+        if feature_type not in self.feature_configs:
+            feature_type = 'INFILL'  # Default fallback
+        
+        config = self.feature_configs[feature_type]
+        preset = self.quality_presets[config['preference']]
+        
+        return {
+            'shaper_preference': preset['shaper_preference'],
+            'freq_adjustment': preset['freq_adjustment'],
+            'damping_adjustment': preset['damping_adjustment'],
+            'custom_shaper': config['custom_shaper'],
+            'custom_freqs': {
+                'x': config['custom_freq_x'],
+                'y': config['custom_freq_y'], 
+                'z': config['custom_freq_z']
+            }
+        }
 
 ######################################################################
 # Real-time Motion Analysis and Compensation
@@ -32,12 +150,15 @@ class MotionAnalyzer:
     def analyze_motion(self, position, velocity, acceleration, time_stamp):
         """Analyze current motion and return recommended compensation parameters"""
         
+        # Support multi-axis analysis (X, Y, Z, A, B, C)
+        num_axes = min(len(position), len(velocity), len(acceleration), 6)
+        
         # Add to motion history
         self.motion_history.append({
             'time': time_stamp,
-            'position': position[:2],  # X, Y only
-            'velocity': velocity[:2],
-            'acceleration': acceleration[:2]
+            'position': position[:num_axes],
+            'velocity': velocity[:num_axes],
+            'acceleration': acceleration[:num_axes]
         })
         
         # Check if enough time has passed for update
@@ -124,46 +245,49 @@ class MotionAnalyzer:
     
     def _generate_compensation_recommendations(self, pattern, stats):
         """Generate compensation parameter recommendations"""
-        recommendations = {
-            'x': {'freq_adjustment': 1.0, 'damping_adjustment': 1.0, 'shaper_hint': None},
-            'y': {'freq_adjustment': 1.0, 'damping_adjustment': 1.0, 'shaper_hint': None}
-        }
+        # Support multi-axis recommendations
+        axis_names = ['x', 'y', 'z', 'a', 'b', 'c']
+        recommendations = {}
         
-        if not stats:
-            return recommendations
+        for axis in axis_names:
+            recommendations[axis] = {
+                'freq_adjustment': 1.0, 
+                'damping_adjustment': 1.0, 
+                'shaper_hint': None
+            }
         
         # Pattern-based adjustments
         if pattern == 'corner_heavy':
             # Corners benefit from higher damping and potentially different shaper
-            for axis in ['x', 'y']:
+            for axis in axis_names:
                 recommendations[axis]['damping_adjustment'] = 1.2
                 recommendations[axis]['shaper_hint'] = 'ei'  # Better for corners
                 
         elif pattern == 'linear':
             # Linear movements can use faster shapers
-            for axis in ['x', 'y']:
+            for axis in axis_names:
                 recommendations[axis]['shaper_hint'] = 'smooth'  # Speed-optimized
                 
         elif pattern == 'variable_speed':
             # Variable speed benefits from adaptive shapers
-            for axis in ['x', 'y']:
+            for axis in axis_names:
                 recommendations[axis]['shaper_hint'] = 'adaptive_ei'
         
         # Speed-based adjustments
         if stats['avg_speed'] > 150:
             # High speed - increase frequency slightly
-            for axis in ['x', 'y']:
+            for axis in axis_names:
                 recommendations[axis]['freq_adjustment'] *= 1.1
                 
         elif stats['avg_speed'] < 50:
             # Low speed - can use higher quality shapers
-            for axis in ['x', 'y']:
+            for axis in axis_names:
                 recommendations[axis]['shaper_hint'] = 'ulv'
         
         # Acceleration-based adjustments
         if stats['avg_accel'] > 5000:
             # High acceleration - need better damping
-            for axis in ['x', 'y']:
+            for axis in axis_names:
                 recommendations[axis]['damping_adjustment'] *= 1.15
                 recommendations[axis]['freq_adjustment'] *= 1.05
         
@@ -181,18 +305,28 @@ class DynamicInputShaper:
         self.adaptation_rate = config.getfloat('adaptation_rate', 0.1, minval=0.01, maxval=1.0)
         self.min_update_interval = config.getfloat('min_update_interval', 0.5, minval=0.1, maxval=5.0)
         
+        # Feature type management
+        self.feature_manager = FeatureTypeManager(config)
+        self.current_feature = None
+        
         # Motion analyzer
         self.motion_analyzer = MotionAnalyzer(config)
         
         # Current adaptive parameters
-        self.base_parameters = {'x': None, 'y': None}  # Base parameters from calibration
-        self.current_adjustments = {'x': {'freq': 1.0, 'damping': 1.0}, 
-                                   'y': {'freq': 1.0, 'damping': 1.0}}
+        self.base_parameters = {}  # Multi-axis base parameters from calibration
+        self.current_adjustments = {}  # Multi-axis current adjustments
+        
+        # Initialize for all potential axes
+        axis_names = ['x', 'y', 'z', 'a', 'b', 'c']
+        for axis in axis_names:
+            self.base_parameters[axis] = None
+            self.current_adjustments[axis] = {'freq': 1.0, 'damping': 1.0}
+            
         self.last_adjustment_time = 0
         
         # Parameter transition smoothing
         self.transition_queue = collections.deque()
-        self.target_parameters = {'x': None, 'y': None}
+        self.target_parameters = {axis: None for axis in axis_names}
         
         # Hook into motion system
         self.printer.register_event_handler("klippy:connect", self._connect)
@@ -208,6 +342,43 @@ class DynamicInputShaper:
         gcode.register_command("GET_DYNAMIC_SHAPER_STATUS",
                              self.cmd_GET_DYNAMIC_SHAPER_STATUS,
                              desc=self.cmd_GET_DYNAMIC_SHAPER_STATUS_help)
+        gcode.register_command("SET_FEATURE_COMPENSATION",
+                             self.cmd_SET_FEATURE_COMPENSATION,
+                             desc=self.cmd_SET_FEATURE_COMPENSATION_help)
+
+    def set_current_feature(self, feature_type):
+        """Set the current feature type for adaptive compensation"""
+        if feature_type != self.current_feature:
+            self.current_feature = feature_type
+            self._update_feature_compensation()
+    
+    def _update_feature_compensation(self):
+        """Update compensation parameters based on current feature type"""
+        if not self.current_feature:
+            return
+        
+        feature_params = self.feature_manager.get_feature_compensation_params(self.current_feature)
+        
+        # Apply feature-specific adjustments to current parameters
+        axis_names = ['x', 'y', 'z', 'a', 'b', 'c']
+        for axis in axis_names:
+            if self.base_parameters[axis] is not None:
+                # Apply feature-specific frequency adjustment
+                freq_adj = feature_params['freq_adjustment']
+                damping_adj = feature_params['damping_adjustment']
+                
+                # Check for custom frequency override
+                custom_freq = feature_params['custom_freqs'].get(axis)
+                if custom_freq is not None:
+                    freq_adj = custom_freq / self.base_parameters[axis].get('freq', 1.0)
+                
+                self.current_adjustments[axis]['freq'] = freq_adj
+                self.current_adjustments[axis]['damping'] = damping_adj
+                
+                # Apply shaper preference if no custom shaper specified
+                if not feature_params['custom_shaper']:
+                    preferred_shapers = feature_params['shaper_preference']
+                    self.current_adjustments[axis]['shaper_hint'] = preferred_shapers[0]
 
     def _connect(self):
         """Connect to motion system for real-time updates"""
@@ -331,13 +502,47 @@ class DynamicInputShaper:
     def cmd_GET_DYNAMIC_SHAPER_STATUS(self, gcmd):
         """Get current dynamic shaper status"""
         gcmd.respond_info(f"Dynamic shaping enabled: {self.enabled}")
+        gcmd.respond_info(f"Current feature type: {self.current_feature or 'None'}")
         
-        for axis in ['x', 'y']:
+        axis_names = ['x', 'y', 'z', 'a', 'b', 'c']
+        for axis in axis_names:
             if self.base_parameters[axis]:
                 base = self.base_parameters[axis]
                 current = self.current_adjustments[axis]
                 gcmd.respond_info(f"{axis.upper()}-axis base: {base[0]} @ {base[1]:.1f}Hz")
                 gcmd.respond_info(f"{axis.upper()}-axis adjustments: freq×{current['freq']:.2f}, damping×{current['damping']:.2f}")
+
+    cmd_SET_FEATURE_COMPENSATION_help = "Configure feature-specific compensation parameters"
+    def cmd_SET_FEATURE_COMPENSATION(self, gcmd):
+        """Configure feature-specific compensation parameters"""
+        feature = gcmd.get('FEATURE')
+        preference = gcmd.get('PREFERENCE', 'balance')
+        
+        if preference not in ['speed', 'balance', 'quality']:
+            raise gcmd.error("PREFERENCE must be one of: speed, balance, quality")
+        
+        # Update feature configuration
+        if feature not in self.feature_manager.feature_configs:
+            self.feature_manager.feature_configs[feature] = {}
+        
+        self.feature_manager.feature_configs[feature]['preference'] = preference
+        
+        # Optional custom parameters
+        custom_shaper = gcmd.get('CUSTOM_SHAPER', None)
+        if custom_shaper:
+            self.feature_manager.feature_configs[feature]['custom_shaper'] = custom_shaper
+        
+        for axis in ['x', 'y', 'z']:
+            freq_param = f'CUSTOM_FREQ_{axis.upper()}'
+            custom_freq = gcmd.get_float(freq_param, None)
+            if custom_freq:
+                self.feature_manager.feature_configs[feature][f'custom_freq_{axis}'] = custom_freq
+        
+        gcmd.respond_info(f"Set {feature} compensation to {preference} preference")
+        
+        # Apply immediately if this is the current feature
+        if feature == self.current_feature:
+            self._update_feature_compensation()
 
 def load_config(config):
     return DynamicInputShaper(config)
