@@ -15,6 +15,10 @@ TEST_DAMPING_RATIOS=[0.075, 0.1, 0.15]
 
 AUTOTUNE_SHAPERS = ['zv', 'mzv', 'ei', '2hump_ei', '3hump_ei']
 
+# Extended autotune list for comprehensive analysis
+COMPREHENSIVE_AUTOTUNE_SHAPERS = ['zv', 'mzv', 'zvd', 'ei', '2hump_ei', '3hump_ei', 
+                                  'smooth', 'adaptive_ei', 'multi_freq', 'ulv']
+
 ######################################################################
 # Frequency response calculation and shaper auto-tuning
 ######################################################################
@@ -30,6 +34,10 @@ class CalibrationData:
         self._psd_map = {'x': self.psd_x, 'y': self.psd_y, 'z': self.psd_z,
                          'all': self.psd_sum}
         self.data_sets = 1
+        # Enhanced analysis data
+        self._peak_frequencies = None
+        self._cross_coupling = None
+        self._harmonic_analysis = None
     def add_data(self, other):
         np = self.numpy
         joined_data_sets = self.data_sets + other.data_sets
@@ -41,6 +49,10 @@ class CalibrationData:
             psd *= self.data_sets
             psd[:] = (psd + other_normalized) * (1. / joined_data_sets)
         self.data_sets = joined_data_sets
+        # Reset analysis cache when data changes
+        self._peak_frequencies = None
+        self._cross_coupling = None
+        self._harmonic_analysis = None
     def set_numpy(self, numpy):
         self.numpy = numpy
     def normalize_to_frequencies(self):
@@ -53,6 +65,126 @@ class CalibrationData:
                     -(2. * MIN_FREQ / (self.freq_bins[low_freqs] + .1))**2 + 1.)
     def get_psd(self, axis='all'):
         return self._psd_map[axis]
+    
+    def find_peak_frequencies(self, min_prominence=None):
+        """Find dominant resonance frequencies using peak detection"""
+        if self._peak_frequencies is not None:
+            return self._peak_frequencies
+            
+        np = self.numpy
+        try:
+            from scipy.signal import find_peaks
+        except ImportError:
+            # Fallback simple peak detection
+            psd = self.psd_sum
+            peaks = []
+            for i in range(1, len(psd)-1):
+                if psd[i] > psd[i-1] and psd[i] > psd[i+1]:
+                    peaks.append(i)
+            peak_freqs = self.freq_bins[peaks] if peaks else []
+        else:
+            # Use scipy for more sophisticated peak detection
+            psd = self.psd_sum
+            if min_prominence is None:
+                min_prominence = np.max(psd) * 0.1
+            peaks, properties = find_peaks(psd, prominence=min_prominence)
+            peak_freqs = self.freq_bins[peaks]
+            
+        self._peak_frequencies = peak_freqs
+        return peak_freqs
+    
+    def analyze_cross_coupling(self):
+        """Analyze cross-axis coupling between X and Y axes"""
+        if self._cross_coupling is not None:
+            return self._cross_coupling
+            
+        np = self.numpy
+        # Calculate coherence between X and Y axes
+        try:
+            from scipy.signal import coherence
+            # Simple correlation analysis as fallback
+            correlation = np.corrcoef(self.psd_x, self.psd_y)[0, 1]
+            coupling_strength = abs(correlation)
+        except ImportError:
+            # Simple correlation analysis
+            correlation = np.corrcoef(self.psd_x, self.psd_y)[0, 1]
+            coupling_strength = abs(correlation)
+            
+        # Find frequencies with strong coupling
+        ratio = np.minimum(self.psd_x, self.psd_y) / np.maximum(self.psd_x, self.psd_y)
+        high_coupling_mask = ratio > 0.5
+        coupled_freqs = self.freq_bins[high_coupling_mask]
+        
+        self._cross_coupling = {
+            'strength': coupling_strength,
+            'correlation': correlation,
+            'coupled_frequencies': coupled_freqs
+        }
+        return self._cross_coupling
+    
+    def analyze_harmonics(self, fundamental_freqs=None):
+        """Analyze harmonic content in the frequency response"""
+        if self._harmonic_analysis is not None:
+            return self._harmonic_analysis
+            
+        if fundamental_freqs is None:
+            fundamental_freqs = self.find_peak_frequencies()
+            
+        np = self.numpy
+        harmonics = {}
+        
+        for fundamental in fundamental_freqs:
+            if fundamental < MIN_FREQ:
+                continue
+                
+            harmonic_data = []
+            for harmonic_order in [2, 3, 4, 5]:
+                harmonic_freq = fundamental * harmonic_order
+                if harmonic_freq > np.max(self.freq_bins):
+                    break
+                    
+                # Find closest frequency bin
+                freq_idx = np.argmin(np.abs(self.freq_bins - harmonic_freq))
+                actual_freq = self.freq_bins[freq_idx]
+                
+                if abs(actual_freq - harmonic_freq) < 2.0:  # Within 2 Hz
+                    harmonic_amplitude = self.psd_sum[freq_idx]
+                    harmonic_data.append({
+                        'order': harmonic_order,
+                        'frequency': actual_freq,
+                        'amplitude': harmonic_amplitude
+                    })
+            
+            if harmonic_data:
+                harmonics[fundamental] = harmonic_data
+        
+        self._harmonic_analysis = harmonics
+        return harmonics
+    
+    def get_comprehensive_analysis(self):
+        """Get a comprehensive analysis of the resonance data"""
+        peaks = self.find_peak_frequencies()
+        coupling = self.analyze_cross_coupling()
+        harmonics = self.analyze_harmonics()
+        
+        np = self.numpy
+        # Statistical measures
+        stats = {
+            'peak_frequencies': peaks.tolist() if hasattr(peaks, 'tolist') else list(peaks),
+            'dominant_frequency': peaks[np.argmax(self.psd_sum[np.searchsorted(self.freq_bins, peaks)])] if len(peaks) > 0 else None,
+            'frequency_spread': np.std(peaks) if len(peaks) > 1 else 0,
+            'max_amplitude': np.max(self.psd_sum),
+            'frequency_centroid': np.sum(self.freq_bins * self.psd_sum) / np.sum(self.psd_sum),
+            'cross_coupling': coupling,
+            'harmonics': harmonics,
+            'quality_metrics': {
+                'noise_floor': np.percentile(self.psd_sum, 10),
+                'dynamic_range': np.max(self.psd_sum) / np.percentile(self.psd_sum, 10),
+                'frequency_resolution': self.freq_bins[1] - self.freq_bins[0]
+            }
+        }
+        
+        return stats
 
 
 CalibrationResult = collections.namedtuple(
@@ -322,10 +454,16 @@ class ShaperCalibrate:
     def find_best_shaper(self, calibration_data, shapers=None,
                          damping_ratio=None, scv=None, shaper_freqs=None,
                          max_smoothing=None, test_damping_ratios=None,
-                         max_freq=None, logger=None):
+                         max_freq=None, logger=None, comprehensive=False):
         best_shaper = None
         all_shapers = []
-        shapers = shapers or AUTOTUNE_SHAPERS
+        
+        # Use comprehensive shaper list if requested
+        if comprehensive:
+            shapers = shapers or COMPREHENSIVE_AUTOTUNE_SHAPERS
+        else:
+            shapers = shapers or AUTOTUNE_SHAPERS
+            
         for shaper_cfg in shaper_defs.INPUT_SHAPERS:
             if shaper_cfg.name not in shapers:
                 continue
@@ -348,6 +486,65 @@ class ShaperCalibrate:
                 # or it improves the score and smoothing (by 5% and 10% resp.)
                 best_shaper = shaper
         return best_shaper, all_shapers
+
+    def get_intelligent_recommendations(self, calibration_data, max_smoothing=None, 
+                                       scv=None, logger=None):
+        """Get intelligent shaper recommendations based on comprehensive analysis"""
+        analysis = calibration_data.get_comprehensive_analysis()
+        
+        if logger:
+            logger("=== Comprehensive Resonance Analysis ===")
+            logger("Peak frequencies detected: %s Hz" % 
+                   ', '.join(['%.1f' % f for f in analysis['peak_frequencies']]))
+            if analysis['dominant_frequency']:
+                logger("Dominant frequency: %.1f Hz" % analysis['dominant_frequency'])
+            logger("Cross-axis coupling strength: %.2f" % 
+                   analysis['cross_coupling']['strength'])
+            logger("Frequency centroid: %.1f Hz" % analysis['frequency_centroid'])
+            
+            # Harmonic analysis
+            if analysis['harmonics']:
+                logger("Detected harmonics:")
+                for fundamental, harmonics in analysis['harmonics'].items():
+                    harmonic_info = ', '.join(['%dx (%.1fHz)' % (h['order'], h['frequency']) 
+                                             for h in harmonics])
+                    logger("  %.1f Hz: %s" % (fundamental, harmonic_info))
+
+        # Adaptive recommendations based on analysis
+        recommendations = []
+        
+        # Check for complex resonance patterns
+        num_peaks = len(analysis['peak_frequencies'])
+        coupling_strength = analysis['cross_coupling']['strength']
+        has_harmonics = len(analysis['harmonics']) > 0
+        
+        if num_peaks <= 1 and coupling_strength < 0.3 and not has_harmonics:
+            # Simple resonance pattern - recommend efficient shapers
+            recommendations.extend(['zv', 'mzv', 'smooth'])
+            if logger:
+                logger("Simple resonance pattern detected - recommending efficient shapers")
+        elif num_peaks > 2 or has_harmonics:
+            # Complex resonance pattern - recommend advanced shapers
+            recommendations.extend(['multi_freq', 'ulv', '3hump_ei'])
+            if logger:
+                logger("Complex resonance pattern detected - recommending advanced shapers")
+        elif coupling_strength > 0.6:
+            # Strong cross-coupling - recommend robust shapers
+            recommendations.extend(['ei', '2hump_ei', 'adaptive_ei'])
+            if logger:
+                logger("Strong cross-axis coupling detected - recommending robust shapers")
+        else:
+            # Moderate complexity - balanced approach
+            recommendations.extend(['mzv', 'ei', 'adaptive_ei', 'smooth'])
+            if logger:
+                logger("Moderate complexity detected - using balanced approach")
+
+        # Get detailed analysis for each recommended shaper
+        best_shaper, all_shapers = self.find_best_shaper(
+            calibration_data, shapers=recommendations, max_smoothing=max_smoothing,
+            scv=scv, logger=logger, comprehensive=True)
+        
+        return best_shaper, all_shapers, analysis
 
     def save_params(self, configfile, axis, shaper_name, shaper_freq):
         if axis == 'xy':

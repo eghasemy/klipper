@@ -222,6 +222,9 @@ class ResonanceTester:
         self.gcode.register_command("SHAPER_CALIBRATE",
                                     self.cmd_SHAPER_CALIBRATE,
                                     desc=self.cmd_SHAPER_CALIBRATE_help)
+        self.gcode.register_command("COMPREHENSIVE_RESONANCE_TEST",
+                                    self.cmd_COMPREHENSIVE_RESONANCE_TEST,
+                                    desc=self.cmd_COMPREHENSIVE_RESONANCE_TEST_help)
         self.printer.register_event_handler("klippy:connect", self.connect)
 
     def connect(self):
@@ -345,7 +348,7 @@ class ResonanceTester:
             gcmd.respond_info(
                     "Resonances data written to %s file" % (csv_name,))
     cmd_SHAPER_CALIBRATE_help = (
-        "Simular to TEST_RESONANCES but suggest input shaper config")
+        "Similar to TEST_RESONANCES but suggest input shaper config")
     def cmd_SHAPER_CALIBRATE(self, gcmd):
         # Parse parameters
         axis = gcmd.get("AXIS", None)
@@ -360,6 +363,10 @@ class ResonanceTester:
 
         max_smoothing = gcmd.get_float(
                 "MAX_SMOOTHING", self.max_smoothing, minval=0.05)
+        
+        # Enhanced calibration options
+        comprehensive = gcmd.get_int("COMPREHENSIVE", 0)
+        multi_point = gcmd.get_int("MULTI_POINT", 0)
 
         name_suffix = gcmd.get("NAME", time.strftime("%Y%m%d_%H%M%S"))
         if not self.is_valid_name_suffix(name_suffix):
@@ -370,8 +377,13 @@ class ResonanceTester:
         # Setup shaper calibration
         helper = shaper_calibrate.ShaperCalibrate(self.printer)
 
-        calibration_data = self._run_test(gcmd, calibrate_axes, helper,
-                                          accel_chips=accel_chips)
+        if multi_point:
+            gcmd.respond_info("=== Multi-Point Calibration ===")
+            calibration_data = self._run_multi_point_calibration(
+                gcmd, calibrate_axes, helper, accel_chips)
+        else:
+            calibration_data = self._run_test(gcmd, calibrate_axes, helper,
+                                              accel_chips=accel_chips)
 
         configfile = self.printer.lookup_object('configfile')
         for axis in calibrate_axes:
@@ -385,9 +397,25 @@ class ResonanceTester:
             toolhead_info = toolhead.get_status(systime)
             scv = toolhead_info['square_corner_velocity']
             max_freq = self._get_max_calibration_freq()
-            best_shaper, all_shapers = helper.find_best_shaper(
+            
+            if comprehensive:
+                # Use intelligent recommendations
+                best_shaper, all_shapers, analysis = helper.get_intelligent_recommendations(
                     calibration_data[axis], max_smoothing=max_smoothing,
-                    scv=scv, max_freq=max_freq, logger=gcmd.respond_info)
+                    scv=scv, logger=gcmd.respond_info)
+                
+                # Save detailed analysis
+                analysis_name = self.get_filename(
+                    'analysis', name_suffix, axis, None)
+                self._save_analysis_data(analysis_name, analysis)
+                gcmd.respond_info(
+                    "Detailed analysis saved to %s" % (analysis_name,))
+            else:
+                # Standard calibration
+                best_shaper, all_shapers = helper.find_best_shaper(
+                        calibration_data[axis], max_smoothing=max_smoothing,
+                        scv=scv, max_freq=max_freq, logger=gcmd.respond_info)
+            
             gcmd.respond_info(
                     "Recommended shaper_type_%s = %s, shaper_freq_%s = %.1f Hz"
                     % (axis_name, best_shaper.name,
@@ -405,6 +433,195 @@ class ResonanceTester:
         gcmd.respond_info(
             "The SAVE_CONFIG command will update the printer config file\n"
             "with these parameters and restart the printer.")
+            
+    def _run_multi_point_calibration(self, gcmd, axes, helper, accel_chips=None):
+        """Run calibration at multiple points across the bed"""
+        toolhead = self.printer.lookup_object('toolhead')
+        
+        # Use all configured probe points for multi-point calibration
+        test_points = self.probe_points
+        gcmd.respond_info("Multi-point calibration using %d points" % len(test_points))
+        
+        combined_data = {axis: None for axis in axes}
+        point_data = {}
+        
+        for i, point in enumerate(test_points):
+            gcmd.respond_info("=== Calibrating at point %d/%d: (%.1f, %.1f, %.1f) ===" % 
+                             (i+1, len(test_points), point[0], point[1], point[2]))
+            
+            point_calibration = self._run_test(
+                gcmd, axes, helper, accel_chips=accel_chips, test_point=point)
+            
+            point_data[i] = point_calibration
+            
+            # Combine data from all points
+            for axis in axes:
+                if combined_data[axis] is None:
+                    combined_data[axis] = point_calibration[axis]
+                else:
+                    combined_data[axis].add_data(point_calibration[axis])
+        
+        # Analyze spatial variation
+        self._analyze_spatial_variation(gcmd, point_data, test_points)
+        
+        return combined_data
+    
+    def _analyze_spatial_variation(self, gcmd, point_data, test_points):
+        """Analyze how resonance characteristics vary across the bed"""
+        gcmd.respond_info("=== Spatial Variation Analysis ===")
+        
+        # Analyze frequency variation across points
+        for axis_idx, axis_name in enumerate(['x', 'y']):
+            if axis_idx >= len(list(point_data[0].keys())):
+                continue
+                
+            axis_key = list(point_data[0].keys())[axis_idx]
+            frequencies = []
+            amplitudes = []
+            
+            for point_idx, point_cal in point_data.items():
+                analysis = point_cal[axis_key].get_comprehensive_analysis()
+                if analysis['dominant_frequency']:
+                    frequencies.append(analysis['dominant_frequency'])
+                    amplitudes.append(analysis['max_amplitude'])
+            
+            if frequencies:
+                import statistics
+                freq_mean = statistics.mean(frequencies)
+                freq_std = statistics.stdev(frequencies) if len(frequencies) > 1 else 0
+                amp_mean = statistics.mean(amplitudes)
+                amp_std = statistics.stdev(amplitudes) if len(amplitudes) > 1 else 0
+                
+                gcmd.respond_info("%s-axis spatial analysis:" % axis_name.upper())
+                gcmd.respond_info("  Frequency: %.1f ± %.1f Hz (%.1f%% variation)" % 
+                                 (freq_mean, freq_std, (freq_std/freq_mean)*100 if freq_mean > 0 else 0))
+                gcmd.respond_info("  Amplitude: %.3f ± %.3f (%.1f%% variation)" % 
+                                 (amp_mean, amp_std, (amp_std/amp_mean)*100 if amp_mean > 0 else 0))
+                
+                if freq_std / freq_mean > 0.1:  # More than 10% variation
+                    gcmd.respond_info("  WARNING: High frequency variation detected!")
+                    gcmd.respond_info("  Consider checking mechanical integrity across the bed")
+
+    def _save_analysis_data(self, filename, analysis):
+        """Save detailed analysis data to a file"""
+        try:
+            import json
+            with open(filename.replace('.csv', '.json'), 'w') as f:
+                # Convert numpy arrays to lists for JSON serialization
+                serializable_analysis = {}
+                for key, value in analysis.items():
+                    if hasattr(value, 'tolist'):
+                        serializable_analysis[key] = value.tolist()
+                    elif isinstance(value, dict):
+                        serializable_analysis[key] = {}
+                        for subkey, subvalue in value.items():
+                            if hasattr(subvalue, 'tolist'):
+                                serializable_analysis[key][subkey] = subvalue.tolist()
+                            else:
+                                serializable_analysis[key][subkey] = subvalue
+                    else:
+                        serializable_analysis[key] = value
+                
+                json.dump(serializable_analysis, f, indent=2)
+        except Exception as e:
+            # Fallback to simple text format
+            with open(filename.replace('.csv', '.txt'), 'w') as f:
+                f.write("Comprehensive Resonance Analysis\n")
+                f.write("================================\n\n")
+                f.write("Peak Frequencies: %s Hz\n" % 
+                       ', '.join(['%.1f' % f for f in analysis['peak_frequencies']]))
+                if analysis['dominant_frequency']:
+                    f.write("Dominant Frequency: %.1f Hz\n" % analysis['dominant_frequency'])
+                f.write("Cross-coupling Strength: %.2f\n" % 
+                       analysis['cross_coupling']['strength'])
+                f.write("Frequency Centroid: %.1f Hz\n" % analysis['frequency_centroid'])
+                f.write("\nQuality Metrics:\n")
+                for key, value in analysis['quality_metrics'].items():
+                    f.write("  %s: %.3f\n" % (key, value))
+
+    cmd_COMPREHENSIVE_RESONANCE_TEST_help = (
+        "Run comprehensive resonance analysis with all advanced features")
+    def cmd_COMPREHENSIVE_RESONANCE_TEST(self, gcmd):
+        """Comprehensive resonance testing with all advanced features"""
+        # Parse parameters
+        axis = gcmd.get("AXIS", None)
+        if not axis:
+            test_axes = [TestAxis('x'), TestAxis('y')]
+        elif axis.lower() not in 'xy':
+            raise gcmd.error("Unsupported axis '%s'" % (axis,))
+        else:
+            test_axes = [TestAxis(axis.lower())]
+        
+        chips_str = gcmd.get("CHIPS", None)
+        accel_chips = self._parse_chips(chips_str) if chips_str else None
+        
+        name_suffix = gcmd.get("NAME", time.strftime("%Y%m%d_%H%M%S"))
+        if not self.is_valid_name_suffix(name_suffix):
+            raise gcmd.error("Invalid NAME parameter")
+        
+        gcmd.respond_info("=== COMPREHENSIVE RESONANCE ANALYSIS ===")
+        gcmd.respond_info("This test will perform:")
+        gcmd.respond_info("1. Multi-point bed mapping")
+        gcmd.respond_info("2. Advanced frequency analysis")
+        gcmd.respond_info("3. Cross-axis coupling analysis")
+        gcmd.respond_info("4. Harmonic content analysis")
+        gcmd.respond_info("5. Intelligent shaper recommendations")
+        
+        # Setup comprehensive analysis
+        helper = shaper_calibrate.ShaperCalibrate(self.printer)
+        
+        # Run multi-point calibration
+        calibration_data = self._run_multi_point_calibration(
+            gcmd, test_axes, helper, accel_chips)
+        
+        # Perform comprehensive analysis for each axis
+        for axis in test_axes:
+            axis_name = axis.get_name()
+            gcmd.respond_info("\n=== COMPREHENSIVE ANALYSIS FOR %s AXIS ===" % axis_name.upper())
+            
+            calibration_data[axis].normalize_to_frequencies()
+            
+            # Get intelligent recommendations
+            systime = self.printer.get_reactor().monotonic()
+            toolhead = self.printer.lookup_object('toolhead')
+            toolhead_info = toolhead.get_status(systime)
+            scv = toolhead_info['square_corner_velocity']
+            
+            best_shaper, all_shapers, analysis = helper.get_intelligent_recommendations(
+                calibration_data[axis], scv=scv, logger=gcmd.respond_info)
+            
+            # Save comprehensive results
+            analysis_name = self.get_filename(
+                'comprehensive_analysis', name_suffix, axis, None)
+            self._save_analysis_data(analysis_name, analysis)
+            
+            csv_name = self.save_calibration_data(
+                'comprehensive_data', name_suffix, helper, axis,
+                calibration_data[axis], all_shapers, 
+                max_freq=self._get_max_calibration_freq())
+            
+            gcmd.respond_info("\n=== RESULTS FOR %s AXIS ===" % axis_name.upper())
+            gcmd.respond_info("Best recommended shaper: %s @ %.1f Hz" % 
+                             (best_shaper.name, best_shaper.freq))
+            gcmd.respond_info("Vibration reduction: %.1f%%" % 
+                             ((1 - best_shaper.vibrs) * 100))
+            gcmd.respond_info("Smoothing factor: %.3f" % best_shaper.smoothing)
+            gcmd.respond_info("Max recommended acceleration: %.0f mm/s²" % 
+                             best_shaper.max_accel)
+            gcmd.respond_info("Data saved to: %s" % csv_name)
+            gcmd.respond_info("Analysis saved to: %s" % analysis_name)
+            
+            # Performance comparison
+            gcmd.respond_info("\n=== SHAPER PERFORMANCE COMPARISON ===")
+            sorted_shapers = sorted(all_shapers, key=lambda s: s.score)
+            for i, shaper in enumerate(sorted_shapers[:5]):  # Top 5
+                gcmd.respond_info("%d. %s: %.1f%% vibrations, %.3f smoothing, %.0f mm/s² max_accel" % 
+                                 (i+1, shaper.name, shaper.vibrs * 100, 
+                                  shaper.smoothing, shaper.max_accel))
+        
+        gcmd.respond_info("\n=== COMPREHENSIVE TEST COMPLETE ===")
+        gcmd.respond_info("Use the recommended settings or review the detailed")
+        gcmd.respond_info("analysis files for advanced tuning options.")
     cmd_MEASURE_AXES_NOISE_help = (
         "Measures noise of all enabled accelerometer chips")
     def cmd_MEASURE_AXES_NOISE(self, gcmd):
