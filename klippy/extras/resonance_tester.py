@@ -211,6 +211,17 @@ class ResonanceTester:
         self.max_smoothing = config.getfloat('max_smoothing', None, minval=0.05)
         self.probe_points = config.getlists('probe_points', seps=(',', '\n'),
                                             parser=float, count=3)
+        
+        # Microphone support
+        self.microphone_enabled = config.getboolean('enable_microphone', False)
+        self.microphone_tester = None
+        if self.microphone_enabled:
+            try:
+                from . import microphone_resonance
+                self.microphone_tester = microphone_resonance.MicrophoneResonanceTester(config)
+            except ImportError as e:
+                logging.warning("Failed to load microphone support: %s" % str(e))
+                self.microphone_enabled = False
 
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command("MEASURE_AXES_NOISE",
@@ -233,9 +244,10 @@ class ResonanceTester:
                 for chip_axis, chip_name in self.accel_chip_names]
 
     def _run_test(self, gcmd, axes, helper, raw_name_suffix=None,
-                  accel_chips=None, test_point=None):
+                  accel_chips=None, test_point=None, use_microphone=False):
         toolhead = self.printer.lookup_object('toolhead')
         calibration_data = {axis: None for axis in axes}
+        microphone_data = None
 
         self.generator.prepare_test(gcmd)
 
@@ -263,9 +275,36 @@ class ResonanceTester:
                         aclient = chip.start_internal_client()
                         raw_values.append((axis, aclient, chip.name))
 
+                # Start microphone recording if enabled
+                if use_microphone and self.microphone_enabled and self.microphone_tester:
+                    gcmd.respond_info("Starting microphone recording for audio analysis...")
+                    try:
+                        self.microphone_tester.start_recording()
+                    except Exception as e:
+                        gcmd.respond_info("Microphone recording failed: %s" % str(e))
+                        use_microphone = False
+
                 # Generate moves
                 test_seq = self.generator.gen_test()
                 self.executor.run_test(test_seq, axis, gcmd)
+                
+                # Stop microphone recording and get data
+                if use_microphone and self.microphone_enabled and self.microphone_tester:
+                    try:
+                        mic_data = self.microphone_tester.stop_recording()
+                        if mic_data:
+                            audio_analysis = self.microphone_tester.analyze_audio_resonances(mic_data)
+                            if audio_analysis:
+                                microphone_data = audio_analysis
+                                gcmd.respond_info("Microphone data captured: %.1fs audio, %d peaks detected" % 
+                                                (mic_data.duration, len(audio_analysis['peaks'])))
+                            else:
+                                gcmd.respond_info("Microphone analysis failed")
+                        else:
+                            gcmd.respond_info("No microphone data captured")
+                    except Exception as e:
+                        gcmd.respond_info("Microphone analysis error: %s" % str(e))
+                
                 for chip_axis, aclient, chip_name in raw_values:
                     aclient.finish_measurements()
                     if raw_name_suffix is not None:
@@ -285,6 +324,11 @@ class ResonanceTester:
                             "accelerometer '%s' measured no data" % (
                                 chip_name,))
                     new_data = helper.process_accelerometer_data(aclient)
+                    
+                    # Enhance with microphone data if available
+                    if microphone_data and self.microphone_enabled:
+                        new_data = self._enhance_with_microphone_data(new_data, microphone_data, gcmd)
+                    
                     if calibration_data[axis] is None:
                         calibration_data[axis] = new_data
                     else:
@@ -304,6 +348,7 @@ class ResonanceTester:
         axis = _parse_axis(gcmd, gcmd.get("AXIS").lower())
         chips_str = gcmd.get("CHIPS", None)
         test_point = gcmd.get("POINT", None)
+        use_microphone = gcmd.get_int("MICROPHONE", 0) and self.microphone_enabled
 
         if test_point:
             test_coords = test_point.split(',')
@@ -331,6 +376,9 @@ class ResonanceTester:
         csv_output = 'resonances' in outputs
         raw_output = 'raw_data' in outputs
 
+        if use_microphone:
+            gcmd.respond_info("Microphone-enhanced resonance testing enabled")
+
         # Setup calculation of resonances
         if csv_output:
             helper = shaper_calibrate.ShaperCalibrate(self.printer)
@@ -340,7 +388,8 @@ class ResonanceTester:
         data = self._run_test(
                 gcmd, [axis], helper,
                 raw_name_suffix=name_suffix if raw_output else None,
-                accel_chips=accel_chips, test_point=test_point)[axis]
+                accel_chips=accel_chips, test_point=test_point, 
+                use_microphone=use_microphone)[axis]
         if csv_output:
             csv_name = self.save_calibration_data(
                     'resonances', name_suffix, helper, axis, data,
@@ -367,10 +416,14 @@ class ResonanceTester:
         # Enhanced calibration options
         comprehensive = gcmd.get_int("COMPREHENSIVE", 0)
         multi_point = gcmd.get_int("MULTI_POINT", 0)
+        use_microphone = gcmd.get_int("MICROPHONE", 0) and self.microphone_enabled
 
         name_suffix = gcmd.get("NAME", time.strftime("%Y%m%d_%H%M%S"))
         if not self.is_valid_name_suffix(name_suffix):
             raise gcmd.error("Invalid NAME parameter")
+
+        if use_microphone:
+            gcmd.respond_info("Microphone-enhanced calibration enabled")
 
         input_shaper = self.printer.lookup_object('input_shaper', None)
 
@@ -380,10 +433,11 @@ class ResonanceTester:
         if multi_point:
             gcmd.respond_info("=== Multi-Point Calibration ===")
             calibration_data = self._run_multi_point_calibration(
-                gcmd, calibrate_axes, helper, accel_chips)
+                gcmd, calibrate_axes, helper, accel_chips, use_microphone)
         else:
             calibration_data = self._run_test(gcmd, calibrate_axes, helper,
-                                              accel_chips=accel_chips)
+                                              accel_chips=accel_chips, 
+                                              use_microphone=use_microphone)
 
         configfile = self.printer.lookup_object('configfile')
         for axis in calibrate_axes:
@@ -398,11 +452,11 @@ class ResonanceTester:
             scv = toolhead_info['square_corner_velocity']
             max_freq = self._get_max_calibration_freq()
             
-            if comprehensive:
-                # Use intelligent recommendations
+            if comprehensive or use_microphone:
+                # Use intelligent recommendations (enhanced with microphone data)
                 best_shaper, all_shapers, analysis = helper.get_intelligent_recommendations(
                     calibration_data[axis], max_smoothing=max_smoothing,
-                    scv=scv, logger=gcmd.respond_info)
+                    scv=scv, logger=gcmd.respond_info, use_microphone=use_microphone)
                 
                 # Save detailed analysis
                 analysis_name = self.get_filename(
@@ -434,7 +488,7 @@ class ResonanceTester:
             "The SAVE_CONFIG command will update the printer config file\n"
             "with these parameters and restart the printer.")
             
-    def _run_multi_point_calibration(self, gcmd, axes, helper, accel_chips=None):
+    def _run_multi_point_calibration(self, gcmd, axes, helper, accel_chips=None, use_microphone=False):
         """Run calibration at multiple points across the bed"""
         toolhead = self.printer.lookup_object('toolhead')
         
@@ -450,7 +504,8 @@ class ResonanceTester:
                              (i+1, len(test_points), point[0], point[1], point[2]))
             
             point_calibration = self._run_test(
-                gcmd, axes, helper, accel_chips=accel_chips, test_point=point)
+                gcmd, axes, helper, accel_chips=accel_chips, test_point=point, 
+                use_microphone=use_microphone)
             
             point_data[i] = point_calibration
             
@@ -464,7 +519,58 @@ class ResonanceTester:
         # Analyze spatial variation
         self._analyze_spatial_variation(gcmd, point_data, test_points)
         
-        return combined_data
+    def _enhance_with_microphone_data(self, accel_data, microphone_data, gcmd):
+        """Enhance accelerometer data with microphone analysis"""
+        if not microphone_data or not microphone_data.get('peaks'):
+            return accel_data
+        
+        # Extract peak frequencies from both sources
+        accel_peaks = accel_data.find_peak_frequencies()
+        audio_peaks = [p['frequency'] for p in microphone_data['peaks']]
+        
+        if len(audio_peaks) == 0:
+            return accel_data
+        
+        # Cross-correlate audio and accelerometer peaks
+        from . import microphone_resonance
+        analyzer = microphone_resonance.AudioFrequencyAnalyzer(self.printer)
+        correlations = analyzer.cross_correlate_with_accelerometer(
+            microphone_data['peaks'], accel_peaks)
+        
+        # Report correlation findings
+        gcmd.respond_info("=== Audio-Accelerometer Correlation Analysis ===")
+        confirmed_peaks = 0
+        new_peaks = 0
+        
+        for correlation in correlations:
+            audio_freq = correlation['audio_peak']['frequency']
+            accel_match = correlation['accelerometer_match']
+            confidence = correlation['confidence']
+            
+            if accel_match is not None:
+                if confidence > 0.8:
+                    gcmd.respond_info("CONFIRMED: %.1f Hz (audio) matches %.1f Hz (accel), confidence %.1f%%" % 
+                                    (audio_freq, accel_match, confidence * 100))
+                    confirmed_peaks += 1
+                else:
+                    gcmd.respond_info("WEAK MATCH: %.1f Hz (audio) ~ %.1f Hz (accel), confidence %.1f%%" % 
+                                    (audio_freq, accel_match, confidence * 100))
+            else:
+                gcmd.respond_info("NEW PEAK: %.1f Hz detected in audio only (%.1f dB)" % 
+                                (audio_freq, correlation['audio_peak']['amplitude_db']))
+                new_peaks += 1
+        
+        gcmd.respond_info("Summary: %d confirmed peaks, %d audio-only peaks" % 
+                         (confirmed_peaks, new_peaks))
+        
+        # Store microphone analysis in the calibration data for later use
+        if hasattr(accel_data, '_microphone_analysis'):
+            accel_data._microphone_analysis = microphone_data
+        else:
+            # Add as new attribute
+            accel_data._microphone_analysis = microphone_data
+        
+        return accel_data
     
     def _analyze_spatial_variation(self, gcmd, point_data, test_points):
         """Analyze how resonance characteristics vary across the bed"""
@@ -554,6 +660,7 @@ class ResonanceTester:
         
         chips_str = gcmd.get("CHIPS", None)
         accel_chips = self._parse_chips(chips_str) if chips_str else None
+        use_microphone = gcmd.get_int("MICROPHONE", 0) and self.microphone_enabled
         
         name_suffix = gcmd.get("NAME", time.strftime("%Y%m%d_%H%M%S"))
         if not self.is_valid_name_suffix(name_suffix):
@@ -566,13 +673,16 @@ class ResonanceTester:
         gcmd.respond_info("3. Cross-axis coupling analysis")
         gcmd.respond_info("4. Harmonic content analysis")
         gcmd.respond_info("5. Intelligent shaper recommendations")
+        if use_microphone:
+            gcmd.respond_info("6. Microphone-based audio analysis")
+            gcmd.respond_info("7. Audio-accelerometer cross-correlation")
         
         # Setup comprehensive analysis
         helper = shaper_calibrate.ShaperCalibrate(self.printer)
         
         # Run multi-point calibration
         calibration_data = self._run_multi_point_calibration(
-            gcmd, test_axes, helper, accel_chips)
+            gcmd, test_axes, helper, accel_chips, use_microphone)
         
         # Perform comprehensive analysis for each axis
         for axis in test_axes:
@@ -588,7 +698,8 @@ class ResonanceTester:
             scv = toolhead_info['square_corner_velocity']
             
             best_shaper, all_shapers, analysis = helper.get_intelligent_recommendations(
-                calibration_data[axis], scv=scv, logger=gcmd.respond_info)
+                calibration_data[axis], scv=scv, logger=gcmd.respond_info, 
+                use_microphone=use_microphone)
             
             # Save comprehensive results
             analysis_name = self.get_filename(

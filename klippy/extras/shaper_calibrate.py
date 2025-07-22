@@ -488,9 +488,28 @@ class ShaperCalibrate:
         return best_shaper, all_shapers
 
     def get_intelligent_recommendations(self, calibration_data, max_smoothing=None, 
-                                       scv=None, logger=None):
+                                       scv=None, logger=None, use_microphone=False):
         """Get intelligent shaper recommendations based on comprehensive analysis"""
         analysis = calibration_data.get_comprehensive_analysis()
+        
+        # Enhance analysis with microphone data if available
+        if use_microphone and hasattr(calibration_data, '_microphone_analysis'):
+            microphone_data = calibration_data._microphone_analysis
+            if microphone_data and microphone_data.get('peaks'):
+                analysis['microphone_peaks'] = [p['frequency'] for p in microphone_data['peaks']]
+                analysis['microphone_peak_count'] = len(microphone_data['peaks'])
+                
+                # Cross-validate accelerometer peaks with microphone peaks
+                audio_confirmed_peaks = []
+                for audio_peak in microphone_data['peaks']:
+                    for accel_peak in analysis['peak_frequencies']:
+                        if abs(audio_peak['frequency'] - accel_peak) <= 2.0:  # Within 2 Hz
+                            audio_confirmed_peaks.append(accel_peak)
+                            break
+                analysis['audio_confirmed_peaks'] = audio_confirmed_peaks
+                analysis['audio_confirmation_ratio'] = (
+                    len(audio_confirmed_peaks) / len(analysis['peak_frequencies']) 
+                    if len(analysis['peak_frequencies']) > 0 else 0)
         
         if logger:
             logger("=== Comprehensive Resonance Analysis ===")
@@ -501,6 +520,17 @@ class ShaperCalibrate:
             logger("Cross-axis coupling strength: %.2f" % 
                    analysis['cross_coupling']['strength'])
             logger("Frequency centroid: %.1f Hz" % analysis['frequency_centroid'])
+            
+            # Microphone analysis
+            if use_microphone and 'microphone_peaks' in analysis:
+                logger("=== Microphone Analysis ===")
+                logger("Audio peaks detected: %s Hz" % 
+                       ', '.join(['%.1f' % f for f in analysis['microphone_peaks']]))
+                logger("Audio-accelerometer confirmation: %.1f%% of peaks confirmed" % 
+                       (analysis['audio_confirmation_ratio'] * 100))
+                if analysis['audio_confirmed_peaks']:
+                    logger("Confirmed peaks: %s Hz" % 
+                           ', '.join(['%.1f' % f for f in analysis['audio_confirmed_peaks']]))
             
             # Harmonic analysis
             if analysis['harmonics']:
@@ -518,14 +548,30 @@ class ShaperCalibrate:
         coupling_strength = analysis['cross_coupling']['strength']
         has_harmonics = len(analysis['harmonics']) > 0
         
+        # Enhanced decision making with microphone data
+        audio_confidence = analysis.get('audio_confirmation_ratio', 0) if use_microphone else 0
+        if use_microphone and audio_confidence > 0.7:
+            # High audio confirmation - trust the accelerometer data more
+            confidence_boost = True
+            if logger:
+                logger("High audio-accelerometer correlation detected - boosting confidence in measurements")
+        else:
+            confidence_boost = False
+        
         if num_peaks <= 1 and coupling_strength < 0.3 and not has_harmonics:
             # Simple resonance pattern - recommend efficient shapers
-            recommendations.extend(['zv', 'mzv', 'smooth'])
+            if confidence_boost:
+                recommendations.extend(['smooth', 'zv', 'mzv'])  # Prioritize advanced smooth shaper
+            else:
+                recommendations.extend(['zv', 'mzv', 'smooth'])
             if logger:
                 logger("Simple resonance pattern detected - recommending efficient shapers")
         elif num_peaks > 2 or has_harmonics:
             # Complex resonance pattern - recommend advanced shapers
-            recommendations.extend(['multi_freq', 'ulv', '3hump_ei'])
+            if confidence_boost:
+                recommendations.extend(['ulv', 'multi_freq', '3hump_ei'])  # Prioritize most advanced
+            else:
+                recommendations.extend(['multi_freq', 'ulv', '3hump_ei'])
             if logger:
                 logger("Complex resonance pattern detected - recommending advanced shapers")
         elif coupling_strength > 0.6:
@@ -535,7 +581,10 @@ class ShaperCalibrate:
                 logger("Strong cross-axis coupling detected - recommending robust shapers")
         else:
             # Moderate complexity - balanced approach
-            recommendations.extend(['mzv', 'ei', 'adaptive_ei', 'smooth'])
+            if confidence_boost:
+                recommendations.extend(['adaptive_ei', 'smooth', 'mzv', 'ei'])
+            else:
+                recommendations.extend(['mzv', 'ei', 'adaptive_ei', 'smooth'])
             if logger:
                 logger("Moderate complexity detected - using balanced approach")
 
