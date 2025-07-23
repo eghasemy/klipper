@@ -111,7 +111,7 @@ class AdaptiveCompensationModel:
         points = []
         for x in x_points:
             for y in y_points:
-                points.append(SpatialCalibrationPoint(x, y))
+                points.append(SpatialCalibrationPoint(float(x), float(y)))
                 
         return points
 
@@ -237,7 +237,7 @@ class AdaptiveCompensationModel:
                         
                         if score < best_score:
                             best_score = score
-                            best_shaper = (shaper_cfg.name, freq, 0.1)
+                            best_shaper = (shaper_cfg.name, float(freq), 0.1)
                             
                 except:
                     continue
@@ -263,9 +263,28 @@ class AdaptiveCompensationModel:
 
     def _save_calibration_results(self, results, prefix):
         """Save calibration results to files"""
+        # Convert numpy types to native Python types for JSON serialization
+        def convert_numpy_types(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy_types(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_numpy_types(item) for item in obj]
+            return obj
+        
+        # Convert results to ensure JSON serialization compatibility
+        serializable_results = convert_numpy_types(results)
+        
         # Save JSON results
         with open(f"{prefix}_results.json", 'w') as f:
-            json.dump(results, f, indent=2)
+            json.dump(serializable_results, f, indent=2)
         
         # Save human-readable summary
         with open(f"{prefix}_summary.txt", 'w') as f:
@@ -274,9 +293,13 @@ class AdaptiveCompensationModel:
             
             for point_name, data in results.items():
                 f.write(f"{point_name}: Position {data['position']}\n")
-                f.write(f"  X peaks: {data['x_peaks']}\n") 
-                f.write(f"  Y peaks: {data['y_peaks']}\n")
-                f.write(f"  Optimal shapers: {data['optimal_shapers']}\n\n")
+                # Safely access peaks data with fallback for missing keys
+                x_peaks = data.get('x_peaks', [])
+                y_peaks = data.get('y_peaks', [])
+                f.write(f"  X peaks: {x_peaks}\n") 
+                f.write(f"  Y peaks: {y_peaks}\n")
+                optimal_shapers = data.get('optimal_shapers', {})
+                f.write(f"  Optimal shapers: {optimal_shapers}\n\n")
 
     cmd_BUILD_COMPENSATION_MODEL_help = "Build multi-dimensional compensation model from calibration data"
     def cmd_BUILD_COMPENSATION_MODEL(self, gcmd):

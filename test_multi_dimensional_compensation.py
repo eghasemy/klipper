@@ -427,6 +427,125 @@ def run_performance_benchmarks():
         }
     }
 
+class TestCalibrationResultsSaving(unittest.TestCase):
+    """Test suite for calibration results saving functionality"""
+    
+    def setUp(self):
+        """Set up test environment for calibration saving tests"""
+        # Create mock printer first
+        self.mock_printer = Mock()
+        self.mock_gcode = Mock()
+        self.mock_printer.lookup_object.side_effect = lambda name: {
+            'gcode': self.mock_gcode,
+            'toolhead': Mock(),
+            'input_shaper': Mock()
+        }.get(name)
+        
+        # Create mock configuration
+        self.mock_config = Mock()
+        self.mock_config.get_name.return_value = "adaptive_input_shaper test"
+        self.mock_config.get_printer.return_value = self.mock_printer
+        self.mock_config.getfloat.side_effect = lambda key, default, **kwargs: {
+            'spatial_resolution': 50.0,
+            'transition_smoothing': 0.1,
+        }.get(key, default)
+        self.mock_config.getint.side_effect = lambda key, default, **kwargs: {
+            'speed_bins': 5,
+            'accel_bins': 5
+        }.get(key, default)
+        
+        # Create the adaptive compensation model instance
+        from extras.adaptive_input_shaper import AdaptiveCompensationModel
+        self.adaptive_model = AdaptiveCompensationModel(self.mock_config)
+    
+    def test_save_calibration_results_missing_peaks(self):
+        """Test that _save_calibration_results handles missing x_peaks/y_peaks gracefully"""
+        import tempfile
+        import os
+        
+        # Test data with missing peak information (simulating failed axis testing)
+        test_results = {
+            'point_0': {
+                'position': [50, 50, 0],
+                'optimal_shapers': {'x': ('mzv', 45.2, 0.1)}
+                # Note: missing 'x_peaks' and 'y_peaks' keys
+            },
+            'point_1': {
+                'position': [150, 150, 0],
+                'x_peaks': [47.8],  # Only x_peaks present
+                'optimal_shapers': {'x': ('ei', 47.8, 0.1)}
+                # Note: missing 'y_peaks' key
+            }
+        }
+        
+        # Create temporary directory for test outputs
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_prefix = os.path.join(temp_dir, "test_calibration")
+            
+            # This should not raise an exception
+            try:
+                self.adaptive_model._save_calibration_results(test_results, test_prefix)
+                
+                # Verify files were created
+                self.assertTrue(os.path.exists(f"{test_prefix}_results.json"))
+                self.assertTrue(os.path.exists(f"{test_prefix}_summary.txt"))
+                
+                # Verify JSON file content
+                with open(f"{test_prefix}_results.json", 'r') as f:
+                    saved_results = json.load(f)
+                    self.assertEqual(len(saved_results), 2)
+                    self.assertIn('point_0', saved_results)
+                    self.assertIn('point_1', saved_results)
+                
+                # Verify summary file content
+                with open(f"{test_prefix}_summary.txt", 'r') as f:
+                    summary_content = f.read()
+                    self.assertIn("point_0", summary_content)
+                    self.assertIn("point_1", summary_content)
+                    self.assertIn("X peaks: []", summary_content)  # Should show empty list for missing peaks
+                    self.assertIn("Y peaks: []", summary_content)  # Should show empty list for missing peaks
+                    self.assertIn("X peaks: [47.8]", summary_content)  # Should show actual peaks when present
+                    
+            except Exception as e:
+                self.fail(f"_save_calibration_results raised an exception with missing peaks: {e}")
+    
+    def test_save_calibration_results_with_numpy_types(self):
+        """Test that numpy types are properly converted for JSON serialization"""
+        import tempfile
+        import os
+        import numpy as np
+        
+        # Test data with numpy types that need conversion
+        test_results = {
+            'point_0': {
+                'position': [np.float64(50.0), np.float64(50.0), np.int32(0)],
+                'x_peaks': [np.float64(45.2), np.float64(46.1)],
+                'y_peaks': [np.float64(42.1)],
+                'optimal_shapers': {'x': ('mzv', np.float64(45.2), np.float64(0.1))}
+            }
+        }
+        
+        # Create temporary directory for test outputs
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_prefix = os.path.join(temp_dir, "test_numpy_calibration")
+            
+            # This should not raise a JSON encoding exception
+            try:
+                self.adaptive_model._save_calibration_results(test_results, test_prefix)
+                
+                # Verify JSON file was created and can be loaded back
+                with open(f"{test_prefix}_results.json", 'r') as f:
+                    saved_results = json.load(f)
+                    
+                    # Verify all numpy types were converted to Python native types
+                    point_data = saved_results['point_0']
+                    self.assertIsInstance(point_data['position'][0], (int, float))
+                    self.assertIsInstance(point_data['x_peaks'][0], (int, float))
+                    self.assertIsInstance(point_data['y_peaks'][0], (int, float))
+                    
+            except Exception as e:
+                self.fail(f"_save_calibration_results raised an exception with numpy types: {e}")
+
 def main():
     """Main test runner"""
     print("Multi-Dimensional Resonance Compensation Test Suite")
@@ -437,6 +556,7 @@ def main():
     test_loader = unittest.TestLoader()
     test_suite = test_loader.loadTestsFromTestCase(TestMultiDimensionalCompensation)
     test_suite.addTest(test_loader.loadTestsFromTestCase(TestIntegration))
+    test_suite.addTest(test_loader.loadTestsFromTestCase(TestCalibrationResultsSaving))
     
     test_runner = unittest.TextTestRunner(verbosity=2)
     test_result = test_runner.run(test_suite)
