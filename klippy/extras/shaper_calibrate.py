@@ -662,3 +662,23 @@ class ShaperCalibrate:
                     csvfile.write("\n")
         except IOError as e:
             raise self.error("Error writing to file '%s': %s", output, str(e))
+
+    def generate_html_report(self, output, calibration_data, shapers=None, 
+                           recommended_shaper=None):
+        """Generate a comprehensive HTML report with analysis and recommendations"""
+        try:
+            # Import the report generator
+            from . import resonance_report
+            
+            # Create the report generator
+            generator = resonance_report.ResonanceReportGenerator(
+                calibration_data, shapers or [], recommended_shaper)
+            
+            # Generate the HTML report
+            generator.generate_html_report(output)
+            
+            return output
+        except ImportError as e:
+            raise self.error("HTML report generation requires additional dependencies: %s" % str(e))
+        except Exception as e:
+            raise self.error("Error generating HTML report '%s': %s" % (output, str(e)))
