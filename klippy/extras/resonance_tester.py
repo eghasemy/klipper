@@ -525,9 +525,14 @@ class ResonanceTester:
         """Run calibration at multiple points across the bed"""
         toolhead = self.printer.lookup_object('toolhead')
         
-        # Use all configured probe points for multi-point calibration
-        test_points = self.probe_points
-        gcmd.respond_info("Multi-point calibration using %d points" % len(test_points))
+        # If only one probe point is configured, generate multiple points automatically
+        if len(self.probe_points) == 1:
+            test_points = self._generate_multi_point_grid(gcmd)
+            gcmd.respond_info("Auto-generating %d test points for multi-point calibration" % len(test_points))
+        else:
+            # Use all configured probe points for multi-point calibration
+            test_points = self.probe_points
+            gcmd.respond_info("Multi-point calibration using %d configured points" % len(test_points))
         
         combined_data = {axis: None for axis in axes}
         point_data = {}
@@ -553,6 +558,53 @@ class ResonanceTester:
         self._analyze_spatial_variation(gcmd, point_data, test_points)
         
         return combined_data
+    
+    def _generate_multi_point_grid(self, gcmd):
+        """Generate multiple test points across the bed for multi-point calibration"""
+        # Get printer bounds
+        toolhead = self.printer.lookup_object('toolhead')
+        kin = toolhead.get_kinematics()
+        
+        # Try to get bounds from kinematics
+        try:
+            bounds = kin.get_status()
+            x_min, x_max = bounds.get('axis_minimum', [0, 0, 0])[0], bounds.get('axis_maximum', [200, 200, 200])[0]
+            y_min, y_max = bounds.get('axis_minimum', [0, 0, 0])[1], bounds.get('axis_maximum', [200, 200, 200])[1]
+        except:
+            # Fallback: try to get from config if available
+            try:
+                config = self.printer.lookup_object('configfile')
+                stepper_x = config.get_prefix_sections('stepper_x')[0]
+                stepper_y = config.get_prefix_sections('stepper_y')[0]
+                x_min = stepper_x.getfloat('position_min', 0)
+                x_max = stepper_x.getfloat('position_max', 200)
+                y_min = stepper_y.getfloat('position_min', 0)
+                y_max = stepper_y.getfloat('position_max', 200)
+            except:
+                # Ultimate fallback defaults
+                x_min, x_max = 0, 200
+                y_min, y_max = 0, 200
+        
+        # Use the Z coordinate from the configured probe point
+        z_coord = self.probe_points[0][2]
+        
+        # Generate a 3x3 grid of points with margins from edges
+        margin_x = (x_max - x_min) * 0.15  # 15% margin
+        margin_y = (y_max - y_min) * 0.15  # 15% margin
+        
+        import numpy as np
+        x_points = np.linspace(x_min + margin_x, x_max - margin_x, 3)
+        y_points = np.linspace(y_min + margin_y, y_max - margin_y, 3)
+        
+        points = []
+        for x in x_points:
+            for y in y_points:
+                points.append([float(x), float(y), z_coord])
+        
+        gcmd.respond_info("Generated test points covering X:%.1f-%.1f, Y:%.1f-%.1f" % 
+                         (x_min + margin_x, x_max - margin_x, y_min + margin_y, y_max - margin_y))
+        
+        return points
         
     def _enhance_with_microphone_data(self, accel_data, microphone_data, gcmd):
         """Enhance accelerometer data with microphone analysis"""
