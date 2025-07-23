@@ -264,8 +264,12 @@ class ResonanceTester:
         # Setup shaper calibration helper
         helper = shaper_calibrate.ShaperCalibrate(self.printer)
         
-        # Run test for this single axis
-        calibration_data = self._run_test(gcmd, [axis], helper)
+        # Get current position to use as test point
+        toolhead = self.printer.lookup_object('toolhead')
+        current_pos = toolhead.get_position()
+        
+        # Run test for this single axis at current position
+        calibration_data = self._run_test(gcmd, [axis], helper, test_point=current_pos[:3])
         
         # Return the calibration data for this axis
         return calibration_data[axis]
