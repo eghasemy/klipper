@@ -40,7 +40,50 @@ class InputShaperParams:
         else:
             A, T = self.shapers[self.shaper_type](
                     self.shaper_freq, self.damping_ratio)
+            # Validate shaper parameters
+            if not self._validate_shaper_params(A, T):
+                # Log warning and fall back to simpler shaper
+                import logging
+                logging.warning(
+                    "Shaper parameters for %s are invalid, falling back to mzv" 
+                    % self.shaper_type)
+                A, T = self.shapers['mzv'](self.shaper_freq, self.damping_ratio)
         return len(A), A, T
+    
+    def _validate_shaper_params(self, A, T):
+        """Validate shaper parameters before applying them"""
+        # Check basic constraints
+        if len(A) != len(T):
+            return False
+        if len(A) == 0:
+            return False
+        
+        # Check that impulses sum to approximately 1.0
+        if abs(sum(A) - 1.0) > 1e-6:
+            return False
+            
+        # Check time constraints
+        if T[0] != 0.0:
+            return False
+        for i in range(len(T) - 1):
+            if T[i] > T[i + 1]:
+                return False
+                
+        # Check for reasonable amplitude values
+        for a in A:
+            if a < 0 or a > 2.0:  # Allow some flexibility but catch obviously wrong values
+                return False
+                
+        # Check for reasonable time values (not too long)
+        max_time = max(T) if T else 0
+        if max_time > 1.0:  # 1 second seems unreasonably long
+            return False
+            
+        # Advanced shaper specific limits
+        if len(A) > 10:  # Limit number of impulses for system stability
+            return False
+            
+        return True
     def get_status(self):
         return collections.OrderedDict([
             ('shaper_type', self.shaper_type),
@@ -65,6 +108,41 @@ class AxisInputShaper:
         success = ffi_lib.input_shaper_set_shaper_params(
                 sk, self.axis.encode(), self.n, self.A, self.T) == 0
         if not success:
+            # Log detailed error information
+            import logging
+            logging.warning(
+                "Failed to set shaper kinematics for %s: %d impulses, "
+                "max_time=%.4f, shaper_type=%s" % (
+                    self.axis, self.n, max(self.T) if self.T else 0, 
+                    self.params.shaper_type))
+            
+            # Try fallback to simpler shaper if this is an advanced one
+            advanced_shapers = ['smooth', 'adaptive_ei', 'multi_freq', 'ulv']
+            if self.params.shaper_type in advanced_shapers:
+                logging.info("Attempting fallback to mzv shaper for %s axis" % self.axis)
+                # Save original parameters
+                orig_type = self.params.shaper_type
+                orig_n, orig_A, orig_T = self.n, self.A, self.T
+                
+                # Try with mzv shaper
+                A_fallback, T_fallback = shaper_defs.get_mzv_shaper(
+                    self.params.shaper_freq, self.params.damping_ratio)
+                n_fallback = len(A_fallback)
+                
+                fallback_success = ffi_lib.input_shaper_set_shaper_params(
+                    sk, self.axis.encode(), n_fallback, A_fallback, T_fallback) == 0
+                
+                if fallback_success:
+                    logging.info("Successfully applied fallback mzv shaper for %s axis" % self.axis)
+                    self.n, self.A, self.T = n_fallback, A_fallback, T_fallback
+                    self.params.shaper_type = 'mzv'  # Update to reflect actual applied shaper
+                    return True
+                else:
+                    # Restore original parameters for error reporting
+                    self.n, self.A, self.T = orig_n, orig_A, orig_T
+                    self.params.shaper_type = orig_type
+            
+            # Final fallback: disable shaping
             self.disable_shaping()
             ffi_lib.input_shaper_set_shaper_params(
                     sk, self.axis.encode(), self.n, self.A, self.T)
@@ -175,8 +253,25 @@ class InputShaper:
                                                              old_delay)
         if failed_shapers:
             error = error or self.printer.command_error
-            raise error("Failed to configure shaper(s) %s with given parameters"
-                        % (', '.join([s.get_name() for s in failed_shapers])))
+            # Provide detailed error message with suggestions
+            failed_names = [s.get_name() for s in failed_shapers]
+            error_msg = ("Failed to configure shaper(s) %s with given parameters. " % 
+                        (', '.join(failed_names)))
+            
+            # Check if any advanced shapers failed and provide suggestions
+            advanced_shapers = ['smooth', 'adaptive_ei', 'multi_freq', 'ulv']
+            failed_advanced = [s for s in failed_shapers 
+                             if s.params.shaper_type in advanced_shapers]
+            
+            if failed_advanced:
+                error_msg += ("Advanced shapers require specific conditions. "
+                            "Consider using simpler shapers like 'mzv' or 'ei', "
+                            "or check if shaper frequency is appropriate (typically 20-150 Hz).")
+            else:
+                error_msg += ("Check shaper frequency and damping ratio parameters. "
+                            "Frequency should be between 20-150 Hz, damping ratio 0.05-0.3.")
+                            
+            raise error(error_msg)
     def disable_shaping(self):
         for shaper in self.shapers:
             shaper.disable_shaping()

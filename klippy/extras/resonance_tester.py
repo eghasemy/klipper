@@ -236,6 +236,9 @@ class ResonanceTester:
         self.gcode.register_command("COMPREHENSIVE_RESONANCE_TEST",
                                     self.cmd_COMPREHENSIVE_RESONANCE_TEST,
                                     desc=self.cmd_COMPREHENSIVE_RESONANCE_TEST_help)
+        self.gcode.register_command("GENERATE_SHAPER_REPORT",
+                                    self.cmd_GENERATE_SHAPER_REPORT,
+                                    desc=self.cmd_GENERATE_SHAPER_REPORT_help)
         self.printer.register_event_handler("klippy:connect", self.connect)
 
     def connect(self):
@@ -403,10 +406,12 @@ class ResonanceTester:
         axis = gcmd.get("AXIS", None)
         if not axis:
             calibrate_axes = [TestAxis('x'), TestAxis('y')]
-        elif axis.lower() not in 'xy':
-            raise gcmd.error("Unsupported axis '%s'" % (axis,))
-        else:
+        elif axis.lower() == 'xy':
+            calibrate_axes = [TestAxis('x'), TestAxis('y')]
+        elif axis.lower() in 'xy':
             calibrate_axes = [TestAxis(axis.lower())]
+        else:
+            raise gcmd.error("Unsupported axis '%s'" % (axis,))
         chips_str = gcmd.get("CHIPS", None)
         accel_chips = self._parse_chips(chips_str) if chips_str else None
 
@@ -518,6 +523,8 @@ class ResonanceTester:
         
         # Analyze spatial variation
         self._analyze_spatial_variation(gcmd, point_data, test_points)
+        
+        return combined_data
         
     def _enhance_with_microphone_data(self, accel_data, microphone_data, gcmd):
         """Enhance accelerometer data with microphone analysis"""
@@ -778,6 +785,63 @@ class ResonanceTester:
         shaper_calibrate.save_calibration_data(output, calibration_data,
                                                all_shapers, max_freq)
         return output
+
+    cmd_GENERATE_SHAPER_REPORT_help = (
+        "Generate a comprehensive HTML report from calibration data")
+    def cmd_GENERATE_SHAPER_REPORT(self, gcmd):
+        """Generate a comprehensive HTML report with analysis and recommendations"""
+        # Parse parameters
+        input_file = gcmd.get("INPUT", None)
+        output_file = gcmd.get("OUTPUT", None)
+        name_suffix = gcmd.get("NAME", time.strftime("%Y%m%d_%H%M%S"))
+        
+        if not input_file:
+            raise gcmd.error("INPUT parameter is required (path to calibration CSV file)")
+        
+        if not os.path.exists(input_file):
+            raise gcmd.error("Input file not found: %s" % input_file)
+        
+        if not output_file:
+            output_file = os.path.join("/tmp", "resonance_report_%s.html" % name_suffix)
+        
+        try:
+            # Import the calibration parser from the standalone script
+            import sys
+            script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'scripts')
+            sys.path.append(script_path)
+            import calibrate_shaper
+            
+            # Parse the calibration data
+            gcmd.respond_info("Parsing calibration data from %s..." % input_file)
+            calibration_data = calibrate_shaper.parse_log(input_file)
+            
+            # Setup shaper calibration helper
+            helper = shaper_calibrate.ShaperCalibrate(self.printer)
+            
+            # Run shaper fitting to get recommendations
+            gcmd.respond_info("Analyzing shaper performance...")
+            systime = self.printer.get_reactor().monotonic()
+            toolhead = self.printer.lookup_object('toolhead')
+            toolhead_info = toolhead.get_status(systime)
+            scv = toolhead_info['square_corner_velocity']
+            max_freq = 200.0  # Use a reasonable default
+            
+            # Find best shaper
+            best_shaper, all_shapers = helper.find_best_shaper(
+                calibration_data, max_smoothing=None, scv=scv, max_freq=max_freq)
+            
+            # Generate HTML report
+            gcmd.respond_info("Generating comprehensive HTML report...")
+            report_path = helper.generate_html_report(
+                output_file, calibration_data, all_shapers, best_shaper)
+            
+            gcmd.respond_info("📊 Comprehensive HTML report generated successfully!")
+            gcmd.respond_info("Report saved to: %s" % report_path)
+            gcmd.respond_info("Open this file in a web browser to view detailed analysis")
+            gcmd.respond_info("and recommendations for your input shaper configuration.")
+            
+        except Exception as e:
+            raise gcmd.error("Failed to generate HTML report: %s" % str(e))
 
 def load_config(config):
     return ResonanceTester(config)

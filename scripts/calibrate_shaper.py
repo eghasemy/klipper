@@ -150,6 +150,8 @@ def main():
                     default=None, help="filename of output graph")
     opts.add_option("-c", "--csv", type="string", dest="csv",
                     default=None, help="filename of output csv file")
+    opts.add_option("--html", type="string", dest="html",
+                    default=None, help="filename of output HTML report")
     opts.add_option("-f", "--max_freq", type="float", default=200.,
                     help="maximum frequency to plot")
     opts.add_option("-s", "--max_smoothing", type="float", dest="max_smoothing",
@@ -232,6 +234,41 @@ def main():
             max_freq=max_freq)
     if selected_shaper is None:
         return
+
+    # Generate HTML report if requested
+    if options.html:
+        print("Generating comprehensive HTML report...")
+        try:
+            # Import report generator
+            sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'klippy'))
+            from extras import resonance_report
+            
+            # Find the recommended shaper object from the list
+            recommended_shaper_obj = None
+            if isinstance(selected_shaper, str):
+                # selected_shaper is just the name, find the actual shaper object
+                for shaper in shapers:
+                    if shaper.name == selected_shaper:
+                        recommended_shaper_obj = shaper
+                        break
+            else:
+                recommended_shaper_obj = selected_shaper
+            
+            # Create report generator
+            generator = resonance_report.ResonanceReportGenerator(
+                calibration_data, shapers, recommended_shaper_obj)
+            
+            # Generate HTML report
+            generator.generate_html_report(options.html)
+            print(f"📊 Comprehensive HTML report generated: {options.html}")
+            print("Open this file in a web browser to view detailed analysis and recommendations.")
+            
+        except ImportError as e:
+            print(f"Error: Could not generate HTML report - {e}")
+        except Exception as e:
+            print(f"Error generating HTML report: {e}")
+            import traceback
+            traceback.print_exc()
 
     if not options.csv or options.output:
         # Draw graph
