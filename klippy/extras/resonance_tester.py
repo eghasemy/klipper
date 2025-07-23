@@ -246,6 +246,20 @@ class ResonanceTester:
                 (chip_axis, self.printer.lookup_object(chip_name))
                 for chip_axis, chip_name in self.accel_chip_names]
 
+    def _test_axis(self, gcmd, axis_name):
+        """Test a single axis and return calibration data for that axis"""
+        # Parse axis name to TestAxis object
+        axis = _parse_axis(gcmd, axis_name)
+        
+        # Setup shaper calibration helper
+        helper = shaper_calibrate.ShaperCalibrate(self.printer)
+        
+        # Run test for this single axis
+        calibration_data = self._run_test(gcmd, [axis], helper)
+        
+        # Return the calibration data for this axis
+        return calibration_data[axis]
+
     def _run_test(self, gcmd, axes, helper, raw_name_suffix=None,
                   accel_chips=None, test_point=None, use_microphone=False):
         toolhead = self.printer.lookup_object('toolhead')
