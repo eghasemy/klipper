@@ -111,7 +111,7 @@ class AdaptiveCompensationModel:
         points = []
         for x in x_points:
             for y in y_points:
-                points.append(SpatialCalibrationPoint(x, y))
+                points.append(SpatialCalibrationPoint(float(x), float(y)))
                 
         return points
 
@@ -237,7 +237,7 @@ class AdaptiveCompensationModel:
                         
                         if score < best_score:
                             best_score = score
-                            best_shaper = (shaper_cfg.name, freq, 0.1)
+                            best_shaper = (shaper_cfg.name, float(freq), 0.1)
                             
                 except:
                     continue
@@ -269,11 +269,13 @@ class AdaptiveCompensationModel:
                 return int(obj)
             elif isinstance(obj, np.floating):
                 return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
             elif isinstance(obj, np.ndarray):
                 return obj.tolist()
             elif isinstance(obj, dict):
                 return {k: convert_numpy_types(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
+            elif isinstance(obj, (list, tuple)):
                 return [convert_numpy_types(item) for item in obj]
             return obj
         
