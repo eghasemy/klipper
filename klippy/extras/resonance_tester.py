@@ -406,10 +406,12 @@ class ResonanceTester:
         axis = gcmd.get("AXIS", None)
         if not axis:
             calibrate_axes = [TestAxis('x'), TestAxis('y')]
-        elif axis.lower() not in 'xy':
-            raise gcmd.error("Unsupported axis '%s'" % (axis,))
-        else:
+        elif axis.lower() == 'xy':
+            calibrate_axes = [TestAxis('x'), TestAxis('y')]
+        elif axis.lower() in 'xy':
             calibrate_axes = [TestAxis(axis.lower())]
+        else:
+            raise gcmd.error("Unsupported axis '%s'" % (axis,))
         chips_str = gcmd.get("CHIPS", None)
         accel_chips = self._parse_chips(chips_str) if chips_str else None
 
