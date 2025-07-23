@@ -13,7 +13,14 @@ class TestAxis:
         else:
             self._name = axis
         if vib_dir is None:
-            self._vib_dir = (1., 0.) if axis == 'x' else (0., 1.)
+            if axis == 'x':
+                self._vib_dir = (1., 0.)
+            elif axis == 'y':
+                self._vib_dir = (0., 1.)
+            elif axis == 'z':
+                self._vib_dir = (0., 0.)  # Z-axis doesn't use XY vibration direction
+            else:
+                self._vib_dir = (1., 0.)  # Default to X direction
         else:
             s = math.sqrt(sum([d*d for d in vib_dir]))
             self._vib_dir = [d / s for d in vib_dir]
@@ -21,6 +28,9 @@ class TestAxis:
         if self._vib_dir[0] and 'x' in chip_axis:
             return True
         if self._vib_dir[1] and 'y' in chip_axis:
+            return True
+        # For Z-axis, check if chip supports Z measurements
+        if self._name == 'z' and 'z' in chip_axis:
             return True
         return False
     def get_name(self):
@@ -32,7 +42,7 @@ def _parse_axis(gcmd, raw_axis):
     if raw_axis is None:
         return None
     raw_axis = raw_axis.lower()
-    if raw_axis in ['x', 'y']:
+    if raw_axis in ['x', 'y', 'z']:
         return TestAxis(axis=raw_axis)
     dirs = raw_axis.split(',')
     if len(dirs) != 2:
@@ -245,6 +255,24 @@ class ResonanceTester:
         self.accel_chips = [
                 (chip_axis, self.printer.lookup_object(chip_name))
                 for chip_axis, chip_name in self.accel_chip_names]
+
+    def _test_axis(self, gcmd, axis_name):
+        """Test a single axis and return calibration data for that axis"""
+        # Parse axis name to TestAxis object
+        axis = _parse_axis(gcmd, axis_name)
+        
+        # Setup shaper calibration helper
+        helper = shaper_calibrate.ShaperCalibrate(self.printer)
+        
+        # Get current position to use as test point
+        toolhead = self.printer.lookup_object('toolhead')
+        current_pos = toolhead.get_position()
+        
+        # Run test for this single axis at current position
+        calibration_data = self._run_test(gcmd, [axis], helper, test_point=current_pos[:3])
+        
+        # Return the calibration data for this axis
+        return calibration_data[axis]
 
     def _run_test(self, gcmd, axes, helper, raw_name_suffix=None,
                   accel_chips=None, test_point=None, use_microphone=False):
