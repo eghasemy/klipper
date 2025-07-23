@@ -658,7 +658,12 @@ class ShaperCalibrate:
                         calibration_data.psd_sum[i]))
                     if shapers:
                         for shaper in shapers:
-                            csvfile.write(",%.3f" % (shaper.vals[i],))
+                            # Add bounds checking to prevent IndexError
+                            if i < len(shaper.vals):
+                                csvfile.write(",%.3f" % (shaper.vals[i],))
+                            else:
+                                # If shaper.vals is shorter than expected, output 0
+                                csvfile.write(",0.000")
                     csvfile.write("\n")
         except IOError as e:
             raise self.error("Error writing to file '%s': %s", output, str(e))
