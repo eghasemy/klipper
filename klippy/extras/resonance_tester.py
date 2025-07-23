@@ -524,6 +524,8 @@ class ResonanceTester:
         # Analyze spatial variation
         self._analyze_spatial_variation(gcmd, point_data, test_points)
         
+        return combined_data
+        
     def _enhance_with_microphone_data(self, accel_data, microphone_data, gcmd):
         """Enhance accelerometer data with microphone analysis"""
         if not microphone_data or not microphone_data.get('peaks'):
